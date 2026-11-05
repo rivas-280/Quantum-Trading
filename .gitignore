@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 .claude/skills/etf-signal-scanner/state/
 .claude/skills/etf-signal-scanner/data/
+.claude/skills/etf-signal-scanner/slack_webhook_url.txt
+.claude/skills/etf-signal-scanner/.venv/
+.claude/skills/etf-signal-scanner/logs/

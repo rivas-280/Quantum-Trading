@@ -31,6 +31,9 @@ import argparse
 import datetime as dt
 import json
 import math
+import os
+import re
+import socket
 import sys
 import time
 from pathlib import Path
@@ -44,6 +47,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = SKILL_DIR / "config.yaml"
 STATE_FILE = SKILL_DIR / "state" / "last_scan.json"
 STATUS_FILE = SKILL_DIR / "state" / "status.json"
+WEBHOOK_FILE = SKILL_DIR / "slack_webhook_url.txt"   # git-ignored; or set SLACK_WEBHOOK_URL
 ET = ZoneInfo("America/New_York")
 SESSION_OPEN = dt.time(9, 30)        # regular trading hours
 SESSION_CLOSE = dt.time(16, 0)
@@ -926,7 +930,91 @@ def scan_once(cfg: dict, args) -> dict:
     return scan
 
 
+# ---------------------------------------------------------------- direct Slack posting
+# Used when the scanner runs on its own (e.g. a Windows scheduled task) instead
+# of through the Claude skill, which posts via the Slack connector.
+
+def webhook_url() -> str | None:
+    url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    if not url and WEBHOOK_FILE.exists():
+        url = WEBHOOK_FILE.read_text().strip()
+    return url or None
+
+
+def to_slack_mrkdwn(md: str) -> str:
+    """Convert the alert markdown to Slack's mrkdwn: **bold** -> *bold*, and
+    markdown tables -> an aligned monospace block (webhooks don't render tables)."""
+    out: list[str] = []
+    table: list[str] = []
+
+    def flush():
+        if not table:
+            return
+        rows = [[c.strip() for c in r.strip().strip("|").split("|")] for r in table
+                if not set(r.replace("|", "").strip()) <= set("-: ")]
+        ncol = max(len(r) for r in rows)
+        widths = [max(len(r[i]) if i < len(r) else 0 for r in rows) for i in range(ncol)]
+        lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip() for r in rows]
+        out.append("```\n" + "\n".join(lines) + "\n```")
+        table.clear()
+
+    for line in md.splitlines():
+        if line.lstrip().startswith("|"):
+            table.append(line)
+            continue
+        flush()
+        out.append(re.sub(r"\*\*(.+?)\*\*", r"*\1*", line))
+    flush()
+    return "\n".join(out)
+
+
+def post_to_slack(messages: list[str], url: str) -> list[str]:
+    """Post each message to a Slack incoming webhook; return error strings."""
+    import requests
+    errors = []
+    for m in messages:
+        try:
+            r = requests.post(url, json={"text": to_slack_mrkdwn(m)}, timeout=20)
+            if r.status_code != 200:
+                errors.append(f"HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    return errors
+
+
+def deliver(scan: dict, args) -> None:
+    if not getattr(args, "post_slack", False):
+        return
+    msgs = (scan.get("notify") or {}).get("messages") or []
+    if not msgs:
+        return
+    url = webhook_url()
+    if not url:
+        print("--post-slack: no webhook URL (set SLACK_WEBHOOK_URL or create "
+              f"{WEBHOOK_FILE.name}); {len(msgs)} message(s) not sent", file=sys.stderr, flush=True)
+        return
+    errors = post_to_slack(msgs, url)
+    scan["posted"] = len(msgs) - len(errors)
+    for e in errors:
+        print(f"Slack post failed: {e}", file=sys.stderr, flush=True)
+
+
+def lifecycle_message(cfg: dict, event: str, interval: int) -> str | None:
+    slack = cfg.get("slack") or {}
+    if not (slack.get("enabled") and slack.get("status_messages", True)):
+        return None
+    now = dt.datetime.now(tz=ET)
+    host = socket.gethostname()
+    hours = "04:00-20:00 ET" if cfg["data"].get("include_prepost") else "09:30-16:00 ET"
+    if event == "start":
+        return (f":arrow_forward: **ETF scanner started** on {host} · {now:%a %b %d %H:%M} ET · "
+                f"scanning every {interval} min during {hours}.")
+    return (f":octagonal_sign: **ETF scanner stopped** on {host} · {now:%a %b %d %H:%M} ET "
+            "(the program was closed). No scans or alerts until it starts again.")
+
+
 def emit(scan: dict, cfg: dict, args) -> None:
+    deliver(scan, args)
     if scan.get("status") == "market_closed":
         if args.json:
             print(json.dumps(scan), flush=True)
@@ -956,13 +1044,42 @@ def main(argv=None) -> int:
     p.add_argument("--loop", action="store_true", help="keep scanning every interval")
     p.add_argument("--interval", type=int, help="override interval_minutes for --loop")
     p.add_argument("--no-state", action="store_true", help="don't read/write new-vs-ongoing state")
+    p.add_argument("--post-slack", action="store_true",
+                   help="post alerts/status straight to a Slack incoming webhook "
+                        "(SLACK_WEBHOOK_URL or slack_webhook_url.txt) instead of via Claude")
+    p.add_argument("--test-slack", action="store_true", help="post one test message via the webhook and exit")
+    p.add_argument("--announce", choices=["start", "stop"],
+                   help="post the started/stopped status message via the webhook and exit")
     args = p.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):   # Windows consoles default to cp1252
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     cfg = load_config(args.config)
     if args.timeframes:
         cfg["data"]["timeframes"] = args.timeframes
     if args.source:
         cfg["data"]["source"] = args.source
+
+    if args.test_slack:
+        url = webhook_url()
+        if not url:
+            print(f"No webhook URL: set SLACK_WEBHOOK_URL or create {WEBHOOK_FILE}", file=sys.stderr)
+            return 2
+        errs = post_to_slack([f":white_check_mark: **ETF scanner test** from {socket.gethostname()} · "
+                              f"{dt.datetime.now(tz=ET):%H:%M} ET. Slack posting works."], url)
+        print("\n".join(errs) or "Test message posted.", file=sys.stderr if errs else sys.stdout)
+        return 1 if errs else 0
+
+    if args.announce:
+        url, msg = webhook_url(), lifecycle_message(cfg, args.announce, int(cfg.get("interval_minutes", 15)))
+        if url and msg:
+            errs = post_to_slack([msg], url)
+            print("\n".join(errs) or "Posted.", file=sys.stderr if errs else sys.stdout)
+            return 1 if errs else 0
+        return 0
 
     if not args.loop:
         emit(scan_once(cfg, args), cfg, args)
@@ -972,14 +1089,21 @@ def main(argv=None) -> int:
     align = bool(cfg.get("align_to_bar_close", True))
     delay = int(cfg.get("post_close_delay_seconds", 20))
     print(f"Looping every {interval} min (Ctrl-C to stop)", file=sys.stderr, flush=True)
+    url = webhook_url() if args.post_slack else None
+    start_msg = lifecycle_message(cfg, "start", interval)
+    if url and start_msg:
+        post_to_slack([start_msg], url)
     try:
         while True:
             try:
                 emit(scan_once(cfg, args), cfg, args)
             except Exception as exc:
-                print(f"scan failed: {exc}", file=sys.stderr, flush=True)
+                print(f"{dt.datetime.now(tz=ET):%Y-%m-%d %H:%M} scan failed: {exc}", file=sys.stderr, flush=True)
             time.sleep(seconds_until_next_run(dt.datetime.now(tz=ET), interval, align, delay))
     except KeyboardInterrupt:
+        stop_msg = lifecycle_message(cfg, "stop", interval)
+        if url and stop_msg:
+            post_to_slack([stop_msg], url)
         return 0
 
 

@@ -51,11 +51,16 @@ day (with the time scans resume), when market data stops downloading and when it
 comes back, and when you stop the loop with `/etf-signal-scanner stop`. Change the
 channel, add `WATCH` alerts, or turn it off under `slack:` in the config.
 
+### Run it on a Windows PC, without Claude
+
+To keep it running around the clock on your own computer (starts at boot,
+restarts itself, posts straight to Slack), follow [`windows/README.md`](windows/README.md).
+
 ### Use it without Claude
 
 ```bash
 python3 .claude/skills/etf-signal-scanner/scripts/scan.py           # one scan
-python3 .claude/skills/etf-signal-scanner/scripts/scan.py --loop    # every interval_minutes, aligned to bar closes
+python3 .claude/skills/etf-signal-scanner/scripts/scan.py --loop --post-slack  # every interval_minutes, posting via SLACK_WEBHOOK_URL
 python3 .claude/skills/etf-signal-scanner/scripts/scan.py --json --all --force --tickers SOXX,SPY --timeframes 1h,1d
 ```
 

@@ -421,3 +421,62 @@ def test_closed_scan_returns_stop_notice(cfg, tmp_path, monkeypatch):
     monkeypatch.setattr(scan, "STATE_FILE", tmp_path / "state.json")
     scan.scan_once(cfg, args)
     assert json.loads((tmp_path / "status.json").read_text()) == {"running": True}
+
+
+# ---------------------------------------------------------------- direct Slack posting (standalone / Windows)
+
+def test_to_slack_mrkdwn_converts_bold_and_tables():
+    md = "**New BULLISH SIGNAL: XLK** · $1\nLeveraged: **TECL (3x leveraged)**\n\n| TF | Status |\n|---|---|\n| 1h ★ | SIGNAL 4/4 |\n| 1d | - 2/4 |\n\n_note_"
+    out = scan.to_slack_mrkdwn(md)
+    assert out.startswith("*New BULLISH SIGNAL: XLK* · $1\nLeveraged: *TECL (3x leveraged)*")
+    assert "```\nTF    Status\n1h ★  SIGNAL 4/4\n1d    - 2/4\n```" in out
+    assert "**" not in out and "|" not in out and out.endswith("_note_")
+
+
+class FakeResp:
+    def __init__(self, code=200, text="ok"):
+        self.status_code, self.text = code, text
+
+
+def test_post_to_slack_and_deliver(monkeypatch, tmp_path, capsys):
+    import requests
+    sent = []
+    monkeypatch.setattr(requests, "post", lambda url, json, timeout: sent.append((url, json["text"])) or FakeResp())
+    assert scan.post_to_slack(["**hi**", "two"], "https://hooks.slack.com/x") == []
+    assert sent == [("https://hooks.slack.com/x", "*hi*"), ("https://hooks.slack.com/x", "two")]
+    monkeypatch.setattr(requests, "post", lambda url, json, timeout: FakeResp(404, "no_service"))
+    assert scan.post_to_slack(["x"], "u") == ["HTTP 404: no_service"]
+
+    # deliver: needs --post-slack and a URL; reads the git-ignored file or env var
+    monkeypatch.setattr(scan, "WEBHOOK_FILE", tmp_path / "hook.txt")
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+    s = {"notify": {"messages": ["m1"]}}
+    args = type("A", (), {"post_slack": True})()
+    scan.deliver(s, args)
+    assert "no webhook URL" in capsys.readouterr().err and "posted" not in s
+    (tmp_path / "hook.txt").write_text("https://hooks.slack.com/file\n")
+    sent.clear()
+    monkeypatch.setattr(requests, "post", lambda url, json, timeout: sent.append(url) or FakeResp())
+    scan.deliver(s, args)
+    assert sent == ["https://hooks.slack.com/file"] and s["posted"] == 1
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/env")
+    assert scan.webhook_url() == "https://hooks.slack.com/env"
+    args.post_slack = False
+    sent.clear(); scan.deliver(s, args); assert sent == []
+
+
+def test_lifecycle_and_announce(cfg, monkeypatch, tmp_path, capsys):
+    import requests
+    start = scan.lifecycle_message(cfg, "start", 15)
+    assert "ETF scanner started" in start and "every 15 min" in start and "04:00-20:00 ET" in start
+    assert "ETF scanner stopped" in scan.lifecycle_message(cfg, "stop", 15)
+    cfg["slack"]["status_messages"] = False
+    assert scan.lifecycle_message(cfg, "start", 15) is None
+    sent = []
+    monkeypatch.setattr(requests, "post", lambda url, json, timeout: sent.append(json["text"]) or FakeResp())
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/env")
+    assert scan.main(["--announce", "stop"]) == 0 and "*ETF scanner stopped*" in sent[0]
+    assert scan.main(["--test-slack"]) == 0 and "ETF scanner test" in sent[1]
+    monkeypatch.delenv("SLACK_WEBHOOK_URL")
+    monkeypatch.setattr(scan, "WEBHOOK_FILE", tmp_path / "none.txt")
+    assert scan.main(["--test-slack"]) == 2
