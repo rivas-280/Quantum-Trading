@@ -2,5 +2,4 @@ pandas>=2.0
 numpy>=1.24
 PyYAML>=6.0
 requests>=2.28
-# optional, only if config data.source: yfinance
-# yfinance>=0.2
+yfinance>=0.2

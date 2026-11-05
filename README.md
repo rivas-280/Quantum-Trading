@@ -20,8 +20,8 @@ each mapped to its leveraged ETFs.
 pip install -r .claude/skills/etf-signal-scanner/requirements.txt
 ```
 
-Market data comes from Yahoo Finance's public chart endpoint (no API key). You
-can switch to `yfinance` or local CSV files in the config.
+Market data comes from Yahoo Finance via `yfinance` (no API key). You
+can switch to the direct Yahoo endpoint (`yahoo`, often rate-limited) or local CSV files in the config.
 
 ### Use it in Claude Code
 
