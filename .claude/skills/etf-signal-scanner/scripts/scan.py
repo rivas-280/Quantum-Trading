@@ -552,9 +552,17 @@ def run_scan(cfg: dict, only: set[str] | None, now: dt.datetime) -> dict:
 LEVEL_RANK = {"SIGNAL": 2, "WATCH": 1, None: 0}
 
 
+def lean(res: dict) -> dict:
+    """Which way the current candle points: more bullish or bearish conditions met."""
+    up, down = res["bull"]["met"], res["bear"]["met"]
+    side = "upside" if up > down else "downside" if down > up else "neutral"
+    return {"side": side, "bull_met": up, "bear_met": down, "enabled": res["bull"]["enabled"]}
+
+
 def _tf_summary(res: dict, direction: str, tf: str) -> dict:
     ev = res[direction]
     return {"timeframe": tf, "level": ev["level"], "met": ev["met"], "enabled": ev["enabled"],
+            "lean": lean(res),
             "conditions": ev["conditions"], "macd": ev["details"].get("macd"),
             "last_bar": res["last_bar"], "live": res.get("live", False),
             "indicators": res["indicators"]}
@@ -646,6 +654,15 @@ def _band_text(t: dict, bull: bool) -> str:
     return f"below lower {_fmt(i.get('bb_lower'), 2)}" if bull else f"above upper {_fmt(i.get('bb_upper'), 2)}"
 
 
+def _lean_text(t: dict) -> str:
+    ln = t.get("lean") or {}
+    if ln.get("side") == "upside":
+        return f"▲ upside {ln['bull_met']}/{ln['enabled']}"
+    if ln.get("side") == "downside":
+        return f"▼ downside {ln['bear_met']}/{ln['enabled']}"
+    return "neutral" if ln else ""
+
+
 def _status(t: dict) -> str:
     return f"{t['level'] or '-'} {t['met']}/{t['enabled']}"
 
@@ -666,17 +683,17 @@ def alert_message(a: dict, cfg: dict, timeframes: list[str]) -> str:
             f"({a['name']}) · ${_fmt(a['price'], 2)} · triggered on {trig}")
     kind = "Leveraged" if bull else "Inverse leveraged"
     funds = ", ".join(describe_etf(e) for e in a["trade"]) or "none mapped"
-    rows = ["| TF | Status | RSI " + "/".join(map(str, rsi_lens)) + " | StochRSI K/D | MACD | Bollinger | Bar |",
-            "|---|---|---|---|---|---|---|"]
+    rows = ["| TF | Status | Lean | RSI " + "/".join(map(str, rsi_lens)) + " | StochRSI K/D | MACD | Bollinger | Bar |",
+            "|---|---|---|---|---|---|---|---|"]
     for tf in timeframes:
         t = a["timeframes"].get(tf)
         if not t:
-            rows.append(f"| {tf} | no data | | | | | |")
+            rows.append(f"| {tf} | no data | | | | | | |")
             continue
         i = t["indicators"]
         mark = " ★" if tf in a["triggers"] else ""
         rows.append(
-            f"| {tf}{mark} | {_status(t)} | "
+            f"| {tf}{mark} | {_status(t)} | {_lean_text(t)} | "
             + " / ".join(_fmt(i.get(f"rsi{n}")) for n in rsi_lens)
             + f" | {_fmt(i.get('stoch_k'))} / {_fmt(i.get('stoch_d'))} | {_macd_text(t['macd'], a['direction'], True)} "
             f"| {_band_text(t, bull)} | {_bar_label(t)} |")
@@ -732,7 +749,7 @@ def format_text(scan: dict, cfg: dict, show_all: bool) -> str:
                     continue
                 i = t["indicators"]
                 lines.append(
-                    f"        {tf:<4}{'*' if tf in a['triggers'] else ' '} {_status(t):<10} "
+                    f"        {tf:<4}{'*' if tf in a['triggers'] else ' '} {_status(t):<10} {_lean_text(t):<14}"
                     + " ".join(f"RSI{n} {_fmt(i.get(f'rsi{n}')):>5}" for n in rsi_lens)
                     + f"  K/D {_fmt(i.get('stoch_k')):>5}/{_fmt(i.get('stoch_d')):<5}"
                     f"  MACD {_macd_text(t['macd'], direction, True):<14} BB {_band_text(t, direction == 'bull'):<22} {_bar_label(t)}")

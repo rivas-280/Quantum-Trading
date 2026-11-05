@@ -42,10 +42,11 @@ indicators:
 
 # ---------------------------------------------------------------- signal rules
 rules:
-  # RSI / StochRSI / Bollinger conditions count if they were true on any of the
-  # last N bars of that timeframe (oscillators often bounce off extremes a bar
-  # or two before MACD turns). Set to 1 to require everything on the latest bar.
-  window_bars: 3
+  # 1 = RSI, StochRSI and the Bollinger pierce are judged on the current candle
+  # only (including the still-forming one), so an alert always matches what the
+  # chart shows right now. N > 1 also accepts an extreme from the previous N-1
+  # candles, which on 4h/D charts can reach back days.
+  window_bars: 1
 
   rsi:
     enabled: true

@@ -49,7 +49,9 @@ thresholds, lengths, timeframes, the loop interval and the ticker universe
    WATCH, new first). `triggers` maps each triggering timeframe to its level,
    `new_triggers` lists the ones that are new this scan, and `timeframes` holds
    every timeframe's status (`level`, `met`/`enabled`, `conditions`, `macd`,
-   `indicators`, `live` = still-forming bar). Report:
+   `indicators`, `live` = still-forming bar, `lean` = whether that candle's
+   readings point to upside or downside). Low readings = potential upside
+   (bullish), high readings = potential downside (bearish). Report:
    - **New SIGNALs first.** For each: ticker, direction, price, which
      timeframes triggered, a compact line per timeframe (status, RSI 7/14,
      StochRSI K/D, MACD state), and the funds in `trade`, each labelled
@@ -101,8 +103,9 @@ edit `config.yaml` (it is commented) rather than the script. Useful knobs:
 - `data.timeframes`: charts to evaluate (default `[1h, 2h, 4h, 1d]`; 2h/3h/4h are
   built from 1h bars). `data.closed_bars_only` (default false) controls whether
   the still-forming bar counts.
-- `rules.window_bars`: how many recent bars RSI/StochRSI/band conditions may
-  have fired in (default 3; 1 = all on the latest bar).
+- `rules.window_bars`: 1 (default) judges RSI/StochRSI/band on the current candle
+  only, including the still-forming one; N > 1 also accepts extremes from the
+  previous N-1 candles.
 - `rules.rsi.require`: `all` (RSI 7 **and** 14) or `any`.
 - `rules.macd.lookahead_bars` / `max_bars_since_cross`: how close or how recent the cross must be.
 - `rules.bollinger.mode`: `touch` (wick), `close`, or `cross`.

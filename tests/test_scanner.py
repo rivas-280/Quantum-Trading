@@ -87,7 +87,7 @@ def frame(n=10, **cols):
 
 def test_full_bull_signal(cfg):
     df = frame(rsi7=[25, 28], rsi14=[29, 29.5], stoch_k=[5, 12], stoch_d=[10, 15],
-               macd_hist=[-0.9, -0.6, -0.3, -0.1], low=[94.0, 99.0])
+               macd_hist=[-0.9, -0.6, -0.3, -0.1], low=[99.0, 94.0])
     ev = scan.evaluate_direction(df, "bull", cfg)
     assert ev["level"] == "SIGNAL" and ev["met"] == 4
     assert scan.evaluate_direction(df, "bear", cfg)["level"] is None
@@ -269,7 +269,7 @@ def test_notification_shows_all_timeframes_and_labels(cfg, tmp_path, monkeypatch
     msg = note["messages"][0]
     assert "BULLISH SIGNAL: SOXX" in msg and "triggered on 1h, 2h (new)" in msg
     assert "Leveraged: **SOXL (3x leveraged)**" in msg
-    for tf in ("| 1h ★ |", "| 2h ★ |", "| 4h |", "| 1d |"):
+    for tf in ("| 1h ★ |", "| 2h ★ |", "| 4h |", "| 1d |", "▲ upside"):
         assert tf in msg
     assert "13:30 live" in msg
     s = run_state(cfg, {"1h": ("WATCH", 3), "2h": ("SIGNAL", 4), "4h": (None, 0), "1d": (None, 0)}, 30)
@@ -316,3 +316,23 @@ def test_unadjusted_split_is_rejected():
         scan.check_price_jumps(bars, 0.4)
     scan.check_price_jumps(bars.iloc[:27], 0.4)        # clean data passes
     scan.check_price_jumps(bars, 0)                    # disabled
+
+
+def test_current_candle_only_by_default(cfg):
+    assert cfg["rules"]["window_bars"] == 1
+    # oversold and pierced the band one candle ago, but not on the current candle
+    df = frame(rsi7=[25, 45], rsi14=[29, 50], stoch_k=[5, 40], stoch_d=[10, 40],
+               macd_hist=[-0.9, -0.6, -0.3, -0.1], low=[94.0, 99.0])
+    ev = scan.evaluate_direction(df, "bull", cfg)
+    assert ev["conditions"] == {"rsi": False, "stochrsi": False, "macd": True, "bollinger": False}
+    assert ev["level"] is None
+
+
+def test_low_readings_lean_upside_high_readings_lean_downside(cfg):
+    low = frame(rsi7=[20], rsi14=[25], stoch_k=[5], stoch_d=[8], low=[94.0])
+    high = frame(rsi7=[80], rsi14=[75], stoch_k=[95], stoch_d=[92], high=[106.0])
+    for df, side in ((low, "upside"), (high, "downside")):
+        res = {"bull": scan.evaluate_direction(df, "bull", cfg),
+               "bear": scan.evaluate_direction(df, "bear", cfg)}
+        assert scan.lean(res)["side"] == side
+    assert scan._lean_text({"lean": {"side": "upside", "bull_met": 3, "bear_met": 0, "enabled": 4}}) == "▲ upside 3/4"
