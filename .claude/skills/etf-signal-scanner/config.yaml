@@ -1,0 +1,118 @@
+# ETF Signal Scanner configuration
+# Every value here can be changed without touching code.
+
+# ---------------------------------------------------------------- scheduling
+# How often the scan repeats when looped (via `/loop` in Claude Code or
+# `scan.py --loop`). Independent of the bar timeframe below.
+interval_minutes: 15
+
+# Skip scans outside US regular trading hours (Mon-Fri 09:30-16:00 ET).
+# Pass --force to scan anyway. Exchange holidays are not detected.
+market_hours_only: true
+
+# Standalone --loop only: wait until the next bar closes (+ delay) before
+# scanning, so each scan sees a freshly completed candle.
+align_to_bar_close: true
+post_close_delay_seconds: 20
+
+# ---------------------------------------------------------------- data
+data:
+  source: yahoo          # yahoo (direct HTTP, no extra deps) | yfinance | csv
+  timeframe: 15m         # 1m 2m 5m 15m 30m 60m 90m 1h 1d
+  history_range: auto    # auto, or a Yahoo range string like 30d / 60d / 1y
+  include_prepost: false # include pre/post-market candles
+  closed_bars_only: true # drop the still-forming candle (avoids repainting)
+  csv_dir: ./data        # used only when source: csv  (<TICKER>.csv files)
+  request_pause_seconds: 0.25
+
+# ---------------------------------------------------------------- indicators
+indicators:
+  macd:     {fast: 8, slow: 21, signal: 5}
+  rsi:      {lengths: [7, 14]}
+  stochrsi: {smooth_k: 3, smooth_d: 3, rsi_length: 14, stoch_length: 14}
+  bollinger: {length: 20, stddev: 2.0}
+
+# ---------------------------------------------------------------- signal rules
+rules:
+  # RSI / StochRSI / Bollinger conditions count if they were true on any of the
+  # last N closed bars (oscillators often bounce off extremes a bar or two
+  # before MACD turns). Set to 1 to require everything on the latest bar.
+  window_bars: 3
+
+  rsi:
+    enabled: true
+    oversold: 30
+    overbought: 70
+    require: all         # all = every RSI length must be extreme; any = at least one
+
+  stochrsi:
+    enabled: true
+    oversold: 30
+    overbought: 70
+    line: both           # k | d | both
+
+  macd:
+    enabled: true
+    # "About to cross": histogram (MACD - signal) is on the wrong side of zero
+    # but has moved toward zero for `converging_bars` consecutive bars and, at
+    # its current slope, reaches zero within `lookahead_bars`.
+    converging_bars: 2
+    lookahead_bars: 2
+    # Also accept a cross that already happened this recently (0 = latest bar).
+    max_bars_since_cross: 1
+
+  bollinger:
+    enabled: true
+    # touch = candle low/high pierces the band (wick counts)
+    # close = candle closes outside the band
+    # cross = close moves from inside to outside the band on that bar
+    mode: touch
+
+  # How many enabled conditions must be met.
+  signal_min_conditions: 4   # full confluence -> SIGNAL
+  watch_min_conditions: 3    # near-miss -> WATCH (set higher than 4 to disable)
+
+# ---------------------------------------------------------------- universe
+# underlying = what gets scanned. bull / bear = the leveraged ETFs to consider
+# trading when that underlying fires. Verify tickers with your broker; issuers
+# occasionally close, rename or reverse-split these funds.
+#
+# scan_targets: underlying | leveraged | both
+#   underlying is usually cleanest (more liquid, no decay noise in the chart).
+scan_targets: underlying
+
+universe:
+  # --- broad market
+  - {underlying: SPY,  name: S&P 500,             bull: [SPXL, UPRO, SSO], bear: [SPXS, SPXU, SDS]}
+  - {underlying: QQQ,  name: Nasdaq-100,          bull: [TQQQ, QLD],       bear: [SQQQ, QID]}
+  - {underlying: IWM,  name: Russell 2000,        bull: [TNA, UWM],        bear: [TZA, TWM]}
+  - {underlying: DIA,  name: Dow 30,              bull: [UDOW, DDM],       bear: [SDOW, DXD]}
+  # --- sectors
+  - {underlying: SOXX, name: Semiconductors,      bull: [SOXL],            bear: [SOXS]}
+  - {underlying: XLK,  name: Technology,          bull: [TECL, ROM],       bear: [TECS]}
+  - {underlying: XLF,  name: Financials,          bull: [FAS, UYG],        bear: [FAZ, SKF]}
+  - {underlying: KRE,  name: Regional Banks,      bull: [DPST],            bear: []}
+  - {underlying: XLE,  name: Energy,              bull: [ERX, DIG],        bear: [ERY, DUG]}
+  - {underlying: XOP,  name: Oil & Gas E&P,       bull: [GUSH],            bear: [DRIP]}
+  - {underlying: XBI,  name: Biotech,             bull: [LABU],            bear: [LABD]}
+  - {underlying: XLV,  name: Health Care,         bull: [CURE, RXL],       bear: []}
+  - {underlying: XLI,  name: Industrials,         bull: [DUSL],            bear: []}
+  - {underlying: XLU,  name: Utilities,           bull: [UTSL],            bear: []}
+  - {underlying: XLY,  name: Consumer Disc.,      bull: [WANT],            bear: []}
+  - {underlying: XRT,  name: Retail,              bull: [RETL],            bear: []}
+  - {underlying: ITB,  name: Homebuilders,        bull: [NAIL],            bear: []}
+  - {underlying: IYR,  name: Real Estate,         bull: [URE],             bear: [SRS]}
+  - {underlying: XLRE, name: Real Estate Select,  bull: [DRN],             bear: [DRV]}
+  # --- rates / commodities
+  - {underlying: TLT,  name: 20+yr Treasuries,    bull: [TMF, UBT],        bear: [TMV, TBT]}
+  - {underlying: GLD,  name: Gold,                bull: [UGL],             bear: [GLL]}
+  - {underlying: GDX,  name: Gold Miners,         bull: [NUGT],            bear: [DUST]}
+  - {underlying: GDXJ, name: Junior Gold Miners,  bull: [JNUG],            bear: [JDST]}
+  - {underlying: SLV,  name: Silver,              bull: [AGQ],             bear: [ZSL]}
+  - {underlying: USO,  name: Crude Oil,           bull: [UCO],             bear: [SCO]}
+  - {underlying: UNG,  name: Natural Gas,         bull: [BOIL],            bear: [KOLD]}
+  # --- international
+  - {underlying: FXI,  name: China Large-Cap,     bull: [YINN],            bear: [YANG]}
+  - {underlying: EEM,  name: Emerging Markets,    bull: [EDC],             bear: [EDZ]}
+  - {underlying: EWZ,  name: Brazil,              bull: [BRZU],            bear: []}
+  - {underlying: INDA, name: India,               bull: [INDL],            bear: []}

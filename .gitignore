@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.claude/skills/etf-signal-scanner/state/
+.claude/skills/etf-signal-scanner/data/
