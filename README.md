@@ -39,6 +39,13 @@ Or just ask: *"scan the leveraged ETFs every 15 minutes"*.
 Scans outside US market hours are skipped (add `force` to override), and each
 alert is tagged **NEW** or ongoing so repeat runs only call out what changed.
 
+### Slack alerts
+
+When a **new** SIGNAL fires during a Claude-run scan, the skill posts it to
+Slack through the Slack connector (default: `#all-ethereal-exchange` in the
+Ethereal Exchange workspace). Ongoing signals aren't re-posted. Change the
+channel, add `WATCH` alerts, or turn it off under `slack:` in the config.
+
 ### Use it without Claude
 
 ```bash

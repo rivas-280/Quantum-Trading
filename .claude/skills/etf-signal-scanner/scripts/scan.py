@@ -492,6 +492,51 @@ def _fmt(v, nd=1):
     return "  n/a" if v is None else f"{v:.{nd}f}"
 
 
+def _macd_text(mac: dict | None, direction: str) -> str:
+    mac = mac or {}
+    way = "up" if direction == "bull" else "down"
+    if mac.get("state") == "crossed":
+        return f"crossed {way} {mac['bars_since_cross']} bar(s) ago"
+    if mac.get("state") == "approaching":
+        return f"crossing {way} in ~{mac['bars_to_cross']} bars"
+    return str(mac.get("state", "n/a"))
+
+
+def build_notification(scan: dict, cfg: dict) -> dict | None:
+    """Slack message for alerts that are new this scan, or None."""
+    slack = cfg.get("slack") or {}
+    if not slack.get("enabled") or not slack.get("channel_id"):
+        return None
+    levels = set(slack.get("levels") or ["SIGNAL"])
+    fresh = [a for a in scan.get("alerts", []) if a["new"] and a["level"] in levels]
+    if not fresh:
+        return None
+    rsi_lens = [int(x) for x in cfg["indicators"]["rsi"]["lengths"]]
+    blocks = []
+    for a in fresh:
+        i, bull = a["indicators"], a["direction"] == "bull"
+        bar = dt.datetime.fromisoformat(a["last_bar"]).astimezone(ET).strftime("%H:%M")
+        band = (f"low pierced lower band ${_fmt(i.get('bb_lower'), 2)}" if bull
+                else f"high pierced upper band ${_fmt(i.get('bb_upper'), 2)}")
+        if not a["conditions"].get("bollinger", True):
+            band = "no band pierce yet"
+        missing = [k for k, v in a["conditions"].items() if not v]
+        rsis = " / ".join(f"RSI{n} {_fmt(i.get(f'rsi{n}'))}" for n in rsi_lens)
+        trade = ", ".join(a["trade"]) if a["trade"] else "none mapped"
+        blocks.append("\n".join([
+            f"{':chart_with_upwards_trend:' if bull else ':chart_with_downwards_trend:'} "
+            f"**New {'BULLISH' if bull else 'BEARISH'} {a['level']}: {a['ticker']}** "
+            f"({a['name']}) · {a['met']}/{a['enabled']} · {scan['timeframe']} bar {bar} ET",
+            f"Price ${_fmt(a['price'], 2)} · {rsis} · StochRSI K {_fmt(i.get('stoch_k'))} / D {_fmt(i.get('stoch_d'))}",
+            f"MACD {_macd_text(a['macd'], a['direction'])} · {band}"
+            + (f" · missing: {', '.join(missing)}" if missing else ""),
+            f"Leveraged: **{trade}**",
+        ]))
+    blocks.append("_Screening alert from the ETF signal scanner, not financial advice._")
+    return {"channel_id": slack["channel_id"], "channel_name": slack.get("channel_name"),
+            "count": len(fresh), "message": "\n\n".join(blocks)}
+
+
 def format_text(scan: dict, cfg: dict, show_all: bool) -> str:
     ind, rules = cfg["indicators"], cfg["rules"]
     rsi_lens = [int(x) for x in ind["rsi"]["lengths"]]
@@ -516,13 +561,7 @@ def format_text(scan: dict, cfg: dict, show_all: bool) -> str:
         for a in rows:
             i = a["indicators"]
             checks = " ".join(f"{tags[k]}{'+' if v else '-'}" for k, v in a["conditions"].items())
-            mac = a["macd"] or {}
-            if mac.get("state") == "crossed":
-                mtxt = f"crossed {mac['bars_since_cross']} bar(s) ago"
-            elif mac.get("state") == "approaching":
-                mtxt = f"cross in ~{mac['bars_to_cross']} bars"
-            else:
-                mtxt = mac.get("state", "n/a")
+            mtxt = _macd_text(a["macd"], direction)
             band = i.get("bb_lower") if direction == "bull" else i.get("bb_upper")
             rsis = " ".join(f"RSI{n} {_fmt(i.get(f'rsi{n}'))}" for n in rsi_lens)
             lines.append(
@@ -583,6 +622,7 @@ def scan_once(cfg: dict, args) -> dict | None:
     only = {t.strip().upper() for t in args.tickers.split(",")} if args.tickers else None
     scan = run_scan(cfg, only, now)
     apply_state(scan, use_state=not args.no_state)
+    scan["notify"] = build_notification(scan, cfg)
     return scan
 
 

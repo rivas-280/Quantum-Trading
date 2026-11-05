@@ -72,6 +72,16 @@ rules:
   signal_min_conditions: 4   # full confluence -> SIGNAL
   watch_min_conditions: 3    # near-miss -> WATCH (set higher than 4 to disable)
 
+# ---------------------------------------------------------------- Slack alerts
+# When an alert at one of `levels` is NEW (not already active on the previous
+# scan), the scan output includes a ready-to-send `notify` message and the
+# Claude skill posts it to this channel via the Slack connector.
+slack:
+  enabled: true
+  channel_id: C0BJCGLH7ST            # Ethereal Exchange workspace
+  channel_name: "#all-ethereal-exchange"
+  levels: [SIGNAL]                   # add WATCH to also post new near-misses
+
 # ---------------------------------------------------------------- universe
 # underlying = what gets scanned. bull / bear = the leveraged ETFs to consider
 # trading when that underlying fires. Verify tickers with your broker; issuers

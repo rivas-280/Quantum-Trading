@@ -2,7 +2,7 @@
 name: etf-signal-scanner
 description: Scan ETFs that have leveraged bull/bear versions for RSI(7,14) + StochRSI(3,3,14,14) + MACD(8,21,5) + Bollinger(20,2) confluence (oversold with MACD about to cross up and a lower-band pierce, or the overbought mirror) and say which leveraged ETF to look at. Use when the user asks to scan or check ETFs/leveraged ETFs for setups or signals, says "run the scanner", or wants to start or stop a recurring scan (e.g. "scan every 15 minutes").
 argument-hint: "[loop [minutes] | stop | all | force | TICKER,TICKER]"
-allowed-tools: Bash(python3 .claude/skills/etf-signal-scanner/scripts/scan.py:*), Read
+allowed-tools: Bash(python3 .claude/skills/etf-signal-scanner/scripts/scan.py:*), Read, mcp__Slack__slack_send_message
 ---
 
 # ETF Signal Scanner
@@ -53,7 +53,16 @@ timeframe, the loop interval and the ticker universe are in
    - Mention `errors` briefly (ticker + reason) if present; do not retry them.
    Keep looping reports short: a few lines unless something new fired.
 
-4. Do not place trades or tell the user to buy anything. Present setups as
+4. **Slack alert.** If the JSON's `notify` is not null, send `notify.message`
+   unchanged with the Slack `slack_send_message` tool to `notify.channel_id`
+   (load it with ToolSearch if needed), then add the message link to your report.
+   Send exactly one message per scan and only when `notify` is present: the
+   scanner already limits it to alerts that are new this scan at the levels in
+   `config.yaml` → `slack.levels`, so ongoing alerts are never re-posted. If the
+   send fails, say so in one line and carry on; do not retry or post elsewhere.
+   Never post when the market is closed or when `notify` is null.
+
+5. Do not place trades or tell the user to buy anything. Present setups as
    candidates to check; leveraged ETFs reset daily and decay, so mention it
    once if the user seems to be holding positions overnight.
 
@@ -89,3 +98,5 @@ edit `config.yaml` (it is commented) rather than the script. Useful knobs:
 - `rules.bollinger.mode`: `touch` (wick), `close`, or `cross`.
 - `scan_targets`: `underlying` (default), `leveraged`, or `both`.
 - `universe`: add or remove `{underlying, bull, bear}` entries.
+- `slack.channel_id` / `slack.levels` / `slack.enabled`: where Slack alerts go, which
+  levels trigger them (`[SIGNAL]` by default, add `WATCH` for near-misses), or turn them off.

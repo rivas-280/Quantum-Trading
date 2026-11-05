@@ -190,3 +190,29 @@ def test_end_to_end_csv(tmp_path, cfg, monkeypatch, capsys):
 
     assert scan.main(["--config", str(cfg_path), "--tickers", "SPY", "--force", "--all"]) == 0
     assert "ETF Signal Scan" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- Slack notification
+
+def _alert(level, new, direction="bull", ticker="SOXX"):
+    return {"ticker": ticker, "name": "Semiconductors", "direction": direction, "level": level,
+            "new": new, "met": 4, "enabled": 4,
+            "conditions": {"rsi": True, "stochrsi": True, "macd": True, "bollinger": True},
+            "macd": {"met": True, "state": "approaching", "bars_to_cross": 1.2},
+            "trade": ["SOXL"], "price": 212.34, "last_bar": "2026-11-05T10:30:00-05:00",
+            "indicators": {"rsi7": 22.1, "rsi14": 27.5, "stoch_k": 8.2, "stoch_d": 11.0,
+                           "bb_lower": 211.8, "bb_upper": 220.0}}
+
+
+def test_notification_only_for_new_alerts_at_configured_levels(cfg):
+    scan_out = {"timeframe": "15m", "alerts": [_alert("SIGNAL", False), _alert("WATCH", True, ticker="XLF")]}
+    assert scan.build_notification(scan_out, cfg) is None   # ongoing SIGNAL, WATCH not configured
+    scan_out["alerts"].append(_alert("SIGNAL", True, ticker="QQQ"))
+    note = scan.build_notification(scan_out, cfg)
+    assert note["count"] == 1 and note["channel_id"] == cfg["slack"]["channel_id"]
+    assert "BULLISH SIGNAL: QQQ" in note["message"] and "SOXL" in note["message"]
+    assert "XLF" not in note["message"] and "bar 10:30 ET" in note["message"]
+    cfg["slack"]["levels"] = ["SIGNAL", "WATCH"]
+    assert scan.build_notification(scan_out, cfg)["count"] == 2
+    cfg["slack"]["enabled"] = False
+    assert scan.build_notification(scan_out, cfg) is None
