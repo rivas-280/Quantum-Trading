@@ -46,7 +46,9 @@ alert is tagged **NEW** or ongoing so repeat runs only call out what changed.
 
 When a timeframe newly hits SIGNAL during a Claude-run scan, the skill posts
 the ticker's full 1h/2h/4h/D table to `#etf-scanner` in the Ethereal Exchange
-workspace through the Slack connector. Ongoing signals aren't re-posted. Change the
+workspace through the Slack connector. Ongoing signals aren't re-posted. It also posts when the scanner stops for the
+day (with the time scans resume), when market data stops downloading and when it
+comes back, and when you stop the loop with `/etf-signal-scanner stop`. Change the
 channel, add `WATCH` alerts, or turn it off under `slack:` in the config.
 
 ### Use it without Claude

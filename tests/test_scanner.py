@@ -367,3 +367,57 @@ def test_extended_hours_candles_align_to_4am():
     assert scan._bar_label({"timeframe": "1h", "last_bar": "2026-11-05T17:00:00-05:00"}) == "17:00 after-hrs"
     assert scan._bar_label({"timeframe": "1h", "last_bar": "2026-11-05T07:00:00-05:00", "live": True}) == "07:00 pre-mkt live"
     assert scan._bar_label({"timeframe": "4h", "last_bar": "2026-11-05T08:00:00-05:00"}) == "08:00"
+
+
+# ---------------------------------------------------------------- running status / stop messages
+
+def test_next_session_start():
+    thu_night = dt.datetime(2026, 11, 5, 20, 10, tzinfo=ET)
+    assert scan.next_session_start(thu_night, True) == dt.datetime(2026, 11, 6, 4, 0, tzinfo=ET)
+    fri_night = dt.datetime(2026, 11, 6, 20, 10, tzinfo=ET)
+    assert scan.next_session_start(fri_night, True) == dt.datetime(2026, 11, 9, 4, 0, tzinfo=ET)
+    early = dt.datetime(2026, 11, 5, 3, 0, tzinfo=ET)
+    assert scan.next_session_start(early, False) == dt.datetime(2026, 11, 5, 9, 30, tzinfo=ET)
+
+
+def fake_scan(scanned, failed):
+    return {"scanned_at": "2026-11-05T19:46:00-05:00", "tickers_scanned": scanned,
+            "errors": [{"ticker": f"T{i}", "error": "HTTPError: 429"} for i in range(failed)]
+                      + [{"ticker": "SOXX", "timeframe": "1d", "error": "split"}]}
+
+
+def test_status_stop_outage_and_recovery(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, "STATUS_FILE", tmp_path / "status.json")
+    t = lambda h, m: dt.datetime(2026, 11, 6, h, m, tzinfo=ET)   # Friday
+    assert scan.update_status(t(19, 46), cfg, fake_scan(30, 0)) == []          # running, healthy
+    out = scan.update_status(t(19, 46), cfg, fake_scan(5, 25))
+    assert len(out) == 1 and "isn't getting market data" in out[0] and "25 of 30" in out[0]
+    assert scan.update_status(t(19, 46), cfg, fake_scan(5, 25)) == []          # outage posted once
+    back = scan.update_status(t(19, 46), cfg, fake_scan(30, 0))
+    assert len(back) == 1 and "data is back" in back[0]
+    stop = scan.update_status(t(20, 16), cfg, None)
+    assert len(stop) == 1 and "stopped for the day" in stop[0]
+    assert "Last scan 19:46 ET" in stop[0] and "Mon Nov 09 04:00" in stop[0]
+    assert scan.update_status(t(20, 31), cfg, None) == []                      # only the first skip
+    cfg["slack"]["status_messages"] = False
+    scan.update_status(t(20, 46), cfg, fake_scan(30, 0))
+    assert scan.update_status(t(21, 1), cfg, None) == []                       # disabled
+    assert json.loads((tmp_path / "status.json").read_text())["running"] is False
+
+
+def test_closed_scan_returns_stop_notice(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, "STATUS_FILE", tmp_path / "status.json")
+    (tmp_path / "status.json").write_text(json.dumps({"running": True, "last_scan": "2026-11-05T19:46:00-05:00"}))
+    monkeypatch.setattr(scan, "market_is_open", lambda now, extended=False: False)
+    args = type("A", (), {"force": False, "no_state": False, "tickers": None})()
+    out = scan.scan_once(cfg, args)
+    assert out["status"] == "market_closed"
+    assert out["notify"]["channel_id"] == "C0CF5LJJTTP" and out["notify"]["status_count"] == 1
+    assert scan.scan_once(cfg, args)["notify"] is None                          # already announced
+    args.force = True                                                           # forced runs don't track
+    (tmp_path / "status.json").write_text(json.dumps({"running": True}))
+    monkeypatch.setattr(scan, "run_scan", lambda c, o, n: {"scanned_at": "x", "tickers_scanned": 0,
+                                                           "errors": [], "results": [], "timeframes": []})
+    monkeypatch.setattr(scan, "STATE_FILE", tmp_path / "state.json")
+    scan.scan_once(cfg, args)
+    assert json.loads((tmp_path / "status.json").read_text()) == {"running": True}

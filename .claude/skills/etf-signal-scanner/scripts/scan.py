@@ -43,6 +43,7 @@ import yaml
 SKILL_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = SKILL_DIR / "config.yaml"
 STATE_FILE = SKILL_DIR / "state" / "last_scan.json"
+STATUS_FILE = SKILL_DIR / "state" / "status.json"
 ET = ZoneInfo("America/New_York")
 SESSION_OPEN = dt.time(9, 30)        # regular trading hours
 SESSION_CLOSE = dt.time(16, 0)
@@ -837,23 +838,102 @@ def seconds_until_next_run(now: dt.datetime, interval_min: int, align: bool, del
     return max(1.0, nxt - elapsed)
 
 
-def scan_once(cfg: dict, args) -> dict | None:
+def next_session_start(now: dt.datetime, extended: bool) -> dt.datetime:
+    """Next weekday session open after `now` (exchange holidays not detected)."""
+    open_ = EXT_OPEN if extended else SESSION_OPEN
+    now = now.astimezone(ET)
+    day = now.date()
+    while True:
+        start = dt.datetime.combine(day, open_, tzinfo=ET)
+        if start > now and start.weekday() < 5:
+            return start
+        day += dt.timedelta(days=1)
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def update_status(now: dt.datetime, cfg: dict, scan: dict | None) -> list[str]:
+    """Track whether the scanner is running and return Slack status messages:
+    one when it stops for the day (first skipped scan after a session), one
+    when most tickers can't be fetched, and one when data comes back.
+    `scan` is None when the scan was skipped because the market is closed."""
+    extended = bool(cfg["data"].get("include_prepost"))
+    st = _read_json(STATUS_FILE) or {"running": False, "outage": False}
+    msgs: list[str] = []
+    now_et = now.astimezone(ET)
+    if scan is None:
+        if st.get("running"):
+            nxt = next_session_start(now_et, extended)
+            hours = "04:00-20:00 ET" if extended else "09:30-16:00 ET"
+            last = st.get("last_scan")
+            last_txt = dt.datetime.fromisoformat(last).astimezone(ET).strftime("%H:%M") if last else "n/a"
+            msgs.append(
+                f":octagonal_sign: **ETF scanner stopped for the day** · {now_et:%a %b %d %H:%M} ET, "
+                f"outside scan hours ({hours}). Last scan {last_txt} ET. "
+                f"Next scans start {nxt:%a %b %d %H:%M} ET (exchange holidays aren't detected).")
+            st.update(running=False, stopped_at=now_et.isoformat(timespec="seconds"))
+    else:
+        failures = sum(1 for e in scan["errors"] if not e.get("timeframe"))
+        total = scan["tickers_scanned"] + failures
+        failing = total > 0 and failures / total >= 0.5
+        if failing and not st.get("outage"):
+            first = next(e for e in scan["errors"] if not e.get("timeframe"))
+            msgs.append(
+                f":warning: **ETF scanner isn't getting market data** · {now_et:%H:%M} ET: "
+                f"{failures} of {total} ETFs failed to download (e.g. {first['ticker']}: {first['error'][:150]}). "
+                "Signals can't fire until this clears; it keeps retrying every scan and will post here when data is back.")
+            st["outage"] = True
+        elif not failing and st.get("outage"):
+            msgs.append(f":white_check_mark: **ETF scanner market data is back** · {now_et:%H:%M} ET, "
+                        f"{scan['tickers_scanned']} of {total} ETFs scanned.")
+            st["outage"] = False
+        st.update(running=True, last_scan=scan["scanned_at"])
+    STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATUS_FILE.write_text(json.dumps(st, indent=2))
+    slack = cfg.get("slack") or {}
+    return msgs if slack.get("enabled") and slack.get("status_messages", True) else []
+
+
+def combine_notify(cfg: dict, status_msgs: list[str], signals: dict | None) -> dict | None:
+    msgs = status_msgs + ((signals or {}).get("messages") or [])
+    slack = cfg.get("slack") or {}
+    if not msgs or not slack.get("channel_id"):
+        return None
+    return {"channel_id": slack["channel_id"], "channel_name": slack.get("channel_name"),
+            "count": len(msgs), "status_count": len(status_msgs), "messages": msgs}
+
+
+def scan_once(cfg: dict, args) -> dict:
     now = dt.datetime.now(tz=ET)
     extended = bool(cfg["data"].get("include_prepost"))
-    if cfg.get("market_hours_only", True) and not args.force and not market_is_open(now, extended):
-        return None
+    gated = cfg.get("market_hours_only", True) and not args.force
+    track = gated and not args.no_state   # forced / stateless runs don't change running status
+    if gated and not market_is_open(now, extended):
+        msgs = update_status(now, cfg, None) if track else []
+        return {"status": "market_closed",
+                "message": "Outside scan hours; skipped scan (use --force to override).",
+                "notify": combine_notify(cfg, msgs, None)}
     only = {t.strip().upper() for t in args.tickers.split(",")} if args.tickers else None
     scan = run_scan(cfg, only, now)
     apply_state(scan, cfg, use_state=not args.no_state, now=now)
-    scan["notify"] = build_notification(scan, cfg)
+    msgs = update_status(now, cfg, scan) if track else []
+    scan["notify"] = combine_notify(cfg, msgs, build_notification(scan, cfg))
     return scan
 
 
-def emit(scan: dict | None, cfg: dict, args) -> None:
-    if scan is None:
-        msg = {"status": "market_closed",
-               "message": "US market is closed; skipped scan (use --force to override)."}
-        print(json.dumps(msg) if args.json else msg["message"], flush=True)
+def emit(scan: dict, cfg: dict, args) -> None:
+    if scan.get("status") == "market_closed":
+        if args.json:
+            print(json.dumps(scan), flush=True)
+        else:
+            print(scan["message"], flush=True)
+            for m in (scan.get("notify") or {}).get("messages", []):
+                print(m, flush=True)
         return
     if args.json:
         if not args.all:

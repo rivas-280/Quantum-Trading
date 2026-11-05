@@ -42,8 +42,10 @@ thresholds, lengths, timeframes, the loop interval and the ticker universe
    If it fails with `ModuleNotFoundError`, tell the user to run
    `pip install -r .claude/skills/etf-signal-scanner/requirements.txt`.
 
-2. If the JSON has `"status": "market_closed"`, reply with a single line saying
-   the market is closed and the scan was skipped. Do nothing else (this matters
+2. If the JSON has `"status": "market_closed"`: if `notify` is not null (this
+   happens once, on the first skipped scan after a session, to announce that
+   the scanner stopped for the day), send its messages as in step 4. Then reply
+   with a single line saying the scan was skipped. Do nothing else (this matters
    when looping, so overnight runs stay quiet).
 
 3. Otherwise read `alerts` (one per ticker + direction, sorted SIGNAL before
@@ -68,8 +70,9 @@ thresholds, lengths, timeframes, the loop interval and the ticker universe
    `slack_send_message` tool to `notify.channel_id` (load it with ToolSearch if
    needed), then add the message links to your report. Send only when `notify`
    is present: the scanner already limits it to tickers with a timeframe that is
-   newly triggered at the levels in `config.yaml` → `slack.levels`, so ongoing
-   alerts are never re-posted. If a send fails, say so in one line and carry
+   newly triggered at the levels in `config.yaml` → `slack.levels` (ongoing
+   alerts are never re-posted), plus one-off status messages (stopped for the
+   day, market data failing, data back; `notify.status_count` of them, first). If a send fails, say so in one line and carry
    on; do not retry or post elsewhere.
    Never post when the market is closed or when `notify` is null.
 
@@ -87,7 +90,14 @@ The scanner itself does a single pass; recurring runs come from Claude Code's
   (default 15). Then invoke the `loop` skill with `"<N>m /etf-signal-scanner"`
   (add ` force` or a ticker list after it if the user asked for those). Run the
   first scan right away, then confirm the interval and how to stop.
-- On `stop`: end the loop (stop the scheduled job the loop created) and confirm.
+- On `stop`: end the loop (find the scheduled job running `/etf-signal-scanner`
+  with CronList and delete it with CronDelete), then post to `slack.channel_id`
+  from `config.yaml`: ":octagonal_sign: **ETF scanner stopped manually** · <time>
+  ET. No more scans or alerts until it's restarted with `/etf-signal-scanner loop`."
+  and confirm to the user.
+- When a loop is started, tell the user it lives only in this Claude session:
+  it stops if the session ends, and the loop scheduler expires it after 7 days.
+  Neither of those can post a Slack message, because nothing is running then.
 
 The scanner remembers the previous pass in `state/last_scan.json`, so each
 run tags alerts as new or ongoing and you only shout about new ones.
@@ -115,5 +125,7 @@ edit `config.yaml` (it is commented) rather than the script. Useful knobs:
 - `rules.bollinger.mode`: `touch` (wick), `close`, or `cross`.
 - `scan_targets`: `underlying` (default), `leveraged`, or `both`.
 - `universe`: add or remove `{underlying, bull: {TICKER: leverage}, bear: {TICKER: -leverage}}` entries.
+- `slack.status_messages`: post when the scanner stops for the day and when
+  market data stops or resumes (default true).
 - `slack.channel_id` / `slack.levels` / `slack.enabled`: where Slack alerts go, which
   levels trigger them (`[SIGNAL]` by default, add `WATCH` for near-misses), or turn them off.

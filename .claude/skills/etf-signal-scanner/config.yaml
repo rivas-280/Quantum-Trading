@@ -100,6 +100,9 @@ slack:
   channel_id: C0CF5LJJTTP            # #etf-scanner, Ethereal Exchange workspace
   channel_name: "#etf-scanner"
   levels: [SIGNAL]                   # add WATCH to also post new near-misses
+  # Also post when the scanner stops for the day (first skipped scan after the
+  # session ends) and when market data stops / resumes downloading.
+  status_messages: true
 
 # ---------------------------------------------------------------- universe
 # underlying = what gets scanned.
