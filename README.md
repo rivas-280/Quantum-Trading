@@ -3,8 +3,9 @@
 ## ETF Signal Scanner (Claude Code skill)
 
 A Claude Code skill that scans ETFs with leveraged bull/bear versions for
-reversal setups on the **1h, 2h, 4h and daily** charts, on a repeating schedule
-(every 15 min by default, configurable). When any timeframe triggers, the alert
+reversal setups on the **1h, 2h, 4h and daily** charts, including pre-market and
+after-hours candles, on a repeating schedule (every 15 min from 04:00 to 20:00 ET
+by default, configurable). When any timeframe triggers, the alert
 shows all four.
 
 | Side | RSI 7 & 14 | StochRSI (3,3,14,14) | MACD (8,21,5) | Bollinger (20,2) | Look at |
@@ -38,7 +39,7 @@ From this repo:
 ```
 
 Or just ask: *"scan the leveraged ETFs every 15 minutes"*.
-Scans outside US market hours are skipped (add `force` to override), and each
+Scans outside 04:00-20:00 ET (or 09:30-16:00 with extended hours off) are skipped (add `force` to override), and each
 alert is tagged **NEW** or ongoing so repeat runs only call out what changed.
 
 ### Slack alerts

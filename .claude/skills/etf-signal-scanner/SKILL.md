@@ -9,7 +9,8 @@ allowed-tools: Bash(python3 .claude/skills/etf-signal-scanner/scripts/scan.py:*)
 
 Finds reversal setups on ETFs that have leveraged versions, and points to the
 leveraged ETFs to look at. Every ticker is checked on the 1h, 2h, 4h and daily
-charts (scanning every 15 minutes); when any timeframe triggers, the alert shows
+charts, including pre-market and after-hours candles (scanning every 15 minutes
+from 04:00 to 20:00 ET); when any timeframe triggers, the alert shows
 all of them.
 
 | Side | RSI 7 & 14 | StochRSI %K & %D | MACD (8,21,5) | Bollinger (20,2) | Leveraged ETF |
@@ -103,6 +104,9 @@ edit `config.yaml` (it is commented) rather than the script. Useful knobs:
 - `data.timeframes`: charts to evaluate (default `[1h, 2h, 4h, 1d]`; 2h/3h/4h are
   built from 1h bars). `data.closed_bars_only` (default false) controls whether
   the still-forming bar counts.
+- `data.include_prepost`: true (default) = extended hours: intraday candles cover
+  04:00-20:00 ET, 1h/2h/4h are built from 15m bars aligned to 04:00, and scans run
+  04:00-20:00. Daily candles stay regular-session. false = 09:30-16:00 only.
 - `rules.window_bars`: 1 (default) judges RSI/StochRSI/band on the current candle
   only, including the still-forming one; N > 1 also accepts extremes from the
   previous N-1 candles.

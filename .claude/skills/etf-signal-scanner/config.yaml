@@ -6,7 +6,8 @@
 # `scan.py --loop`). Independent of the chart timeframes below.
 interval_minutes: 15
 
-# Skip scans outside US regular trading hours (Mon-Fri 09:30-16:00 ET).
+# Skip scans outside trading hours: Mon-Fri 04:00-20:00 ET with data.include_prepost,
+# otherwise 09:30-16:00 ET.
 # Pass --force to scan anyway. Exchange holidays are not detected.
 market_hours_only: true
 
@@ -22,7 +23,12 @@ data:
   # to the 09:30 ET open. Also supported: 1m 2m 5m 15m 30m 1h 1d.
   timeframes: [1h, 2h, 4h, 1d]
   history_range: auto    # auto, or a range like 6mo / 1y / 2y (or {60m: 1y, 1d: 2y})
-  include_prepost: false # include pre/post-market candles
+  # true = extended hours: intraday candles cover 04:00-20:00 ET (pre-market and
+  # after-hours), 1h/2h/4h are built from 15m bars aligned to 04:00 (TradingView's
+  # extended-hours layout) and scans run 04:00-20:00. Daily candles stay
+  # regular-session. Pre/post-market volume in these ETFs is thin, so expect
+  # noisier readings. false = regular hours only (09:30-16:00, 4h anchored at 09:30).
+  include_prepost: true
   # false = include the still-forming bar, so a 15-minute scan sees the 1h/2h/4h/D
   # bars as they develop (values can change until the bar closes; alerts mark
   # these "live"). true = only completed bars (a daily bar then updates once a day).

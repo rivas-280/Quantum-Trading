@@ -336,3 +336,34 @@ def test_low_readings_lean_upside_high_readings_lean_downside(cfg):
                "bear": scan.evaluate_direction(df, "bear", cfg)}
         assert scan.lean(res)["side"] == side
     assert scan._lean_text({"lean": {"side": "upside", "bull_met": 3, "bear_met": 0, "enabled": 4}}) == "▲ upside 3/4"
+
+
+# ---------------------------------------------------------------- extended hours
+
+def test_extended_hours_session_and_gate(cfg):
+    assert scan.market_is_open(dt.datetime(2026, 11, 5, 6, 0, tzinfo=ET), extended=True)
+    assert scan.market_is_open(dt.datetime(2026, 11, 5, 19, 30, tzinfo=ET), extended=True)
+    assert not scan.market_is_open(dt.datetime(2026, 11, 5, 19, 30, tzinfo=ET))
+    assert not scan.market_is_open(dt.datetime(2026, 11, 5, 21, 0, tzinfo=ET), extended=True)
+    cfg["data"]["include_prepost"] = True
+    assert scan.session_hours(cfg["data"]) == (scan.EXT_OPEN, scan.EXT_CLOSE)
+    assert scan.timeframe_plan("4h", cfg["data"]) == ("15m", 240, True)
+    assert scan.timeframe_plan("1h", cfg["data"]) == ("15m", 60, True)
+    assert scan.timeframe_plan("1d", cfg["data"]) == ("1d", 1440, False)
+    cfg["data"]["include_prepost"] = False
+    assert scan.timeframe_plan("1h", cfg["data"]) == ("60m", 60, False)
+
+
+def test_extended_hours_candles_align_to_4am():
+    idx = pd.date_range("2026-11-05 04:00", "2026-11-05 19:45", freq="15min", tz=ET)
+    v = np.arange(len(idx), dtype=float)
+    df = pd.DataFrame({"open": v, "high": v + 1, "low": v - 1, "close": v + 0.5, "volume": 1.0}, index=idx)
+    four = scan.resample_session(df, 240, scan.EXT_OPEN)
+    assert [t.strftime("%H:%M") for t in four.index] == ["04:00", "08:00", "12:00", "16:00"]
+    one = scan.resample_session(df, 60, scan.EXT_OPEN)
+    assert one.index[5].strftime("%H:%M") == "09:00" and one.iloc[5].volume == 4  # 09:00-10:00 incl. the open
+    assert scan.bar_end(ts(16, 0), "4h", scan.EXT_CLOSE) == ts(20, 0)
+    assert scan.bar_end(ts(9, 30), "1d", scan.EXT_CLOSE) == ts(16, 0)          # daily stays regular-session
+    assert scan._bar_label({"timeframe": "1h", "last_bar": "2026-11-05T17:00:00-05:00"}) == "17:00 after-hrs"
+    assert scan._bar_label({"timeframe": "1h", "last_bar": "2026-11-05T07:00:00-05:00", "live": True}) == "07:00 pre-mkt live"
+    assert scan._bar_label({"timeframe": "4h", "last_bar": "2026-11-05T08:00:00-05:00"}) == "08:00"

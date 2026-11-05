@@ -44,8 +44,10 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = SKILL_DIR / "config.yaml"
 STATE_FILE = SKILL_DIR / "state" / "last_scan.json"
 ET = ZoneInfo("America/New_York")
-SESSION_OPEN = dt.time(9, 30)
+SESSION_OPEN = dt.time(9, 30)        # regular trading hours
 SESSION_CLOSE = dt.time(16, 0)
+EXT_OPEN = dt.time(4, 0)             # pre-market start / post-market end
+EXT_CLOSE = dt.time(20, 0)
 
 # timeframe -> (interval to download, minutes per bar, resample from download?)
 TIMEFRAMES = {
@@ -56,8 +58,25 @@ TIMEFRAMES = {
     "1d": ("1d", 1440, False),
 }
 # history to download per interval (valid for both Yahoo and yfinance)
-AUTO_RANGE = {"1m": "5d", "2m": "1mo", "5m": "1mo", "15m": "1mo", "30m": "1mo",
+AUTO_RANGE = {"1m": "5d", "2m": "1mo", "5m": "1mo", "15m": "60d", "30m": "60d",
               "60m": "1y", "1d": "2y"}
+
+
+def session_hours(data_cfg: dict) -> tuple[dt.time, dt.time]:
+    """Intraday session the candles cover: 04:00-20:00 with extended hours, else 09:30-16:00."""
+    return (EXT_OPEN, EXT_CLOSE) if data_cfg.get("include_prepost") else (SESSION_OPEN, SESSION_CLOSE)
+
+
+def timeframe_plan(tf: str, data_cfg: dict) -> tuple[str, int, bool]:
+    """(interval to download, minutes per bar, resample?) for a timeframe.
+
+    With extended hours, Yahoo's 60m bars mix clock hours (04:00...09:00) with
+    09:30-anchored ones, so 1h/2h/3h/4h are built from 15m bars on the clock,
+    anchored to 04:00 like TradingView's extended-hours charts."""
+    interval, minutes, derived = TIMEFRAMES[tf]
+    if data_cfg.get("include_prepost") and 60 <= minutes < 1440:
+        return "15m", minutes, True
+    return interval, minutes, derived
 
 # =========================================================================
 # Indicators (TradingView-compatible definitions, pure pandas)
@@ -349,19 +368,20 @@ def clean_bars(df: pd.DataFrame) -> pd.DataFrame:
 _AGG = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
 
 
-def resample_session(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    """Group bars into `minutes`-long bars anchored at the 09:30 ET open each
-    day (so 4h = 09:30-13:30 and 13:30-16:00, like TradingView), or into one
-    bar per day when minutes >= 1440."""
+def resample_session(df: pd.DataFrame, minutes: int, anchor: dt.time = SESSION_OPEN) -> pd.DataFrame:
+    """Group bars into `minutes`-long bars anchored at `anchor` each day
+    (regular hours: 4h = 09:30-13:30 and 13:30-16:00, like TradingView;
+    extended hours anchor at 04:00), or one bar per day when minutes >= 1440."""
     if df.empty:
         return df
     day = df.index.normalize()
     if minutes >= 1440:
         key = day
     else:
-        since_open = (df.index.hour * 60 + df.index.minute) - (SESSION_OPEN.hour * 60 + SESSION_OPEN.minute)
+        start = anchor.hour * 60 + anchor.minute
+        since_open = (df.index.hour * 60 + df.index.minute) - start
         bucket = np.floor_divide(np.asarray(since_open), minutes)
-        offset = SESSION_OPEN.hour * 60 + SESSION_OPEN.minute + bucket * minutes
+        offset = start + bucket * minutes
         key = day + pd.to_timedelta(offset, unit="m")
     out = df.groupby(key).agg(_AGG)
     out.index = pd.DatetimeIndex(out.index).tz_convert(ET) if out.index.tz else out.index
@@ -380,20 +400,21 @@ def check_price_jumps(bars: pd.DataFrame, max_change: float, lookback: int = 250
                            "likely an unadjusted split in the data feed, skipped")
 
 
-def bar_end(start: pd.Timestamp, timeframe: str) -> dt.datetime:
+def bar_end(start: pd.Timestamp, timeframe: str, session_close: dt.time = SESSION_CLOSE) -> dt.datetime:
     minutes = TIMEFRAMES[timeframe][1]
-    close = dt.datetime.combine(start.date(), SESSION_CLOSE, tzinfo=ET)
-    if minutes >= 1440:
-        return close
+    if minutes >= 1440:   # daily candles are regular-session only
+        return dt.datetime.combine(start.date(), SESSION_CLOSE, tzinfo=ET)
+    close = dt.datetime.combine(start.date(), session_close, tzinfo=ET)
     end = start.to_pydatetime() + dt.timedelta(minutes=minutes)
     # session-anchored bars stop at the close (e.g. the 15:30 1h bar, 13:30 4h bar)
-    return min(end, close) if start.time() < SESSION_CLOSE else end
+    return min(end, close) if start.time() < session_close else end
 
 
-def drop_forming_bar(df: pd.DataFrame, timeframe: str, now: dt.datetime) -> pd.DataFrame:
+def drop_forming_bar(df: pd.DataFrame, timeframe: str, now: dt.datetime,
+                     session_close: dt.time = SESSION_CLOSE) -> pd.DataFrame:
     if df.empty:
         return df
-    return df.iloc[:-1] if now < bar_end(df.index[-1], timeframe) else df
+    return df.iloc[:-1] if now < bar_end(df.index[-1], timeframe, session_close) else df
 
 
 # =========================================================================
@@ -452,11 +473,14 @@ def build_targets(cfg: dict, only: set[str] | None) -> list[dict]:
 # Scan
 # =========================================================================
 
-def market_is_open(now: dt.datetime) -> bool:
+def market_is_open(now: dt.datetime, extended: bool = False) -> bool:
+    """Weekday 09:30-16:05 ET, or 04:00-20:05 with extended hours."""
     now = now.astimezone(ET)
     if now.weekday() >= 5:
         return False
-    return SESSION_OPEN <= now.time() <= dt.time(16, 5)
+    open_, close = (EXT_OPEN, EXT_CLOSE) if extended else (SESSION_OPEN, SESSION_CLOSE)
+    last = (dt.datetime.combine(now.date(), close) + dt.timedelta(minutes=5)).time()
+    return open_ <= now.time() <= last
 
 
 def configured_timeframes(data_cfg: dict) -> list[str]:
@@ -474,13 +498,17 @@ def load_bars(ticker: str, timeframes: list[str], data_cfg: dict, session) -> di
     source = data_cfg.get("source", "yfinance")
     prepost = bool(data_cfg.get("include_prepost", False))
     ranges = data_cfg.get("history_range", "auto")
+    anchor = session_hours(data_cfg)[0]
     if source == "csv":
         base = clean_bars(fetch_csv(ticker, (SKILL_DIR / data_cfg.get("csv_dir", "./data")).resolve()))
-        return {tf: resample_session(base, TIMEFRAMES[tf][1]) for tf in timeframes}
+        if not prepost:   # keep only regular-hours bars
+            t = base.index.time
+            base = base[(t >= SESSION_OPEN) & (t < SESSION_CLOSE)]
+        return {tf: resample_session(base, TIMEFRAMES[tf][1], anchor) for tf in timeframes}
     downloads: dict[str, pd.DataFrame] = {}
     out = {}
     for tf in timeframes:
-        interval, minutes, derived = TIMEFRAMES[tf]
+        interval, minutes, derived = timeframe_plan(tf, data_cfg)
         if interval not in downloads:
             rng = AUTO_RANGE.get(interval, "1y") if ranges == "auto" else (
                 ranges.get(interval, AUTO_RANGE.get(interval, "1y")) if isinstance(ranges, dict) else ranges)
@@ -493,7 +521,7 @@ def load_bars(ticker: str, timeframes: list[str], data_cfg: dict, session) -> di
                 raise SystemExit(f"Unknown data source {source!r}")
             downloads[interval] = clean_bars(raw)
         bars = downloads[interval]
-        out[tf] = resample_session(bars, minutes) if derived else bars
+        out[tf] = resample_session(bars, minutes, anchor) if derived else bars
     return out
 
 
@@ -502,6 +530,7 @@ def run_scan(cfg: dict, only: set[str] | None, now: dt.datetime) -> dict:
     timeframes = configured_timeframes(data_cfg)
     need = min_bars_needed(cfg["indicators"])
     closed_only = bool(data_cfg.get("closed_bars_only", False))
+    session_close = session_hours(data_cfg)[1]
     session = None
     if data_cfg.get("source", "yfinance") == "yahoo":
         import requests
@@ -522,12 +551,13 @@ def run_scan(cfg: dict, only: set[str] | None, now: dt.datetime) -> dict:
             bars = per_tf.get(tf)
             try:
                 if closed_only:
-                    bars = drop_forming_bar(bars, tf, now)
+                    bars = drop_forming_bar(bars, tf, now, session_close)
                 if bars is None or len(bars) < need:
                     raise RuntimeError(f"only {0 if bars is None else len(bars)} {tf} bars, need {need}")
                 check_price_jumps(bars, float(data_cfg.get("max_bar_change", 0.4)))
                 res = analyze(bars, cfg)
-                res["live"] = bool(now < bar_end(bars.index[-1], tf))
+                res["live"] = bool(now < bar_end(bars.index[-1], tf, session_close))
+                res["extended_hours"] = bool(data_cfg.get("include_prepost")) and TIMEFRAMES[tf][1] < 1440
                 tf_results[tf] = res
                 price = res["price"] if price is None or TIMEFRAMES[tf][1] < 1440 else price
             except Exception as exc:
@@ -538,6 +568,7 @@ def run_scan(cfg: dict, only: set[str] | None, now: dt.datetime) -> dict:
     return {
         "scanned_at": now.astimezone(ET).isoformat(timespec="seconds"),
         "timeframes": timeframes,
+        "session": "extended (04:00-20:00 ET)" if data_cfg.get("include_prepost") else "regular (09:30-16:00 ET)",
         "source": data_cfg.get("source", "yfinance"),
         "tickers_scanned": len(results),
         "errors": errors,
@@ -669,8 +700,16 @@ def _status(t: dict) -> str:
 
 def _bar_label(t: dict) -> str:
     start = dt.datetime.fromisoformat(t["last_bar"]).astimezone(ET)
-    daily = TIMEFRAMES.get(t.get("timeframe", ""), (None, 0))[1] >= 1440
-    label = start.strftime("%b %d") if daily else start.strftime("%H:%M")
+    minutes = TIMEFRAMES.get(t.get("timeframe", ""), (None, 0))[1]
+    if minutes >= 1440:
+        label = start.strftime("%b %d")
+    else:
+        label = start.strftime("%H:%M")
+        end = (start + dt.timedelta(minutes=minutes)).time()
+        if end <= SESSION_OPEN and start.time() < SESSION_OPEN:
+            label += " pre-mkt"
+        elif start.time() >= SESSION_CLOSE:
+            label += " after-hrs"
     return label + (" live" if t.get("live") else "")
 
 
@@ -800,7 +839,8 @@ def seconds_until_next_run(now: dt.datetime, interval_min: int, align: bool, del
 
 def scan_once(cfg: dict, args) -> dict | None:
     now = dt.datetime.now(tz=ET)
-    if cfg.get("market_hours_only", True) and not args.force and not market_is_open(now):
+    extended = bool(cfg["data"].get("include_prepost"))
+    if cfg.get("market_hours_only", True) and not args.force and not market_is_open(now, extended):
         return None
     only = {t.strip().upper() for t in args.tickers.split(",")} if args.tickers else None
     scan = run_scan(cfg, only, now)
