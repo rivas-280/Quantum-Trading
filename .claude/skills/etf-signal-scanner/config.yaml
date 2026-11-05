@@ -3,26 +3,34 @@
 
 # ---------------------------------------------------------------- scheduling
 # How often the scan repeats when looped (via `/loop` in Claude Code or
-# `scan.py --loop`). Independent of the bar timeframe below.
+# `scan.py --loop`). Independent of the chart timeframes below.
 interval_minutes: 15
 
 # Skip scans outside US regular trading hours (Mon-Fri 09:30-16:00 ET).
 # Pass --force to scan anyway. Exchange holidays are not detected.
 market_hours_only: true
 
-# Standalone --loop only: wait until the next bar closes (+ delay) before
-# scanning, so each scan sees a freshly completed candle.
+# Standalone --loop only: start each scan on an interval boundary (+ delay).
 align_to_bar_close: true
 post_close_delay_seconds: 20
 
 # ---------------------------------------------------------------- data
 data:
   source: yfinance       # yfinance (recommended) | yahoo (direct HTTP, often rate-limited) | csv
-  timeframe: 15m         # 1m 2m 5m 15m 30m 60m 90m 1h 1d
-  history_range: auto    # auto, or a Yahoo range string like 30d / 60d / 1y
+  # Chart timeframes every ticker is evaluated on. When any of them triggers,
+  # the alert shows all of them. 2h / 3h / 4h are built from 1h bars anchored
+  # to the 09:30 ET open. Also supported: 1m 2m 5m 15m 30m 1h 1d.
+  timeframes: [1h, 2h, 4h, 1d]
+  history_range: auto    # auto, or a range like 6mo / 1y / 2y (or {60m: 1y, 1d: 2y})
   include_prepost: false # include pre/post-market candles
-  closed_bars_only: true # drop the still-forming candle (avoids repainting)
-  csv_dir: ./data        # used only when source: csv  (<TICKER>.csv files)
+  # false = include the still-forming bar, so a 15-minute scan sees the 1h/2h/4h/D
+  # bars as they develop (values can change until the bar closes; alerts mark
+  # these "live"). true = only completed bars (a daily bar then updates once a day).
+  closed_bars_only: false
+  csv_dir: ./data        # used only when source: csv  (<TICKER>.csv intraday files)
+  # Skip a timeframe whose closes jump more than this between two bars (0.4 = 40%):
+  # almost always a stock split the feed hasn't fully adjusted. 0 disables.
+  max_bar_change: 0.4
   request_pause_seconds: 0.25
 
 # ---------------------------------------------------------------- indicators
@@ -35,8 +43,8 @@ indicators:
 # ---------------------------------------------------------------- signal rules
 rules:
   # RSI / StochRSI / Bollinger conditions count if they were true on any of the
-  # last N closed bars (oscillators often bounce off extremes a bar or two
-  # before MACD turns). Set to 1 to require everything on the latest bar.
+  # last N bars of that timeframe (oscillators often bounce off extremes a bar
+  # or two before MACD turns). Set to 1 to require everything on the latest bar.
   window_bars: 3
 
   rsi:
@@ -72,20 +80,26 @@ rules:
   signal_min_conditions: 4   # full confluence -> SIGNAL
   watch_min_conditions: 3    # near-miss -> WATCH (set higher than 4 to disable)
 
+  # A trigger that disappears (e.g. a live bar moving back inside the band) is
+  # remembered this long, so if it comes straight back it isn't alerted again.
+  clear_after_minutes: 60
+
 # ---------------------------------------------------------------- Slack alerts
-# When an alert at one of `levels` is NEW (not already active on the previous
-# scan), the scan output includes a ready-to-send `notify` message and the
-# Claude skill posts it to this channel via the Slack connector.
+# When a timeframe newly triggers at one of `levels`, the scan output includes
+# ready-to-send `notify` messages (one per ticker, showing every timeframe) and
+# the Claude skill posts them to this channel via the Slack connector.
 slack:
   enabled: true
-  channel_id: C0BJCGLH7ST            # Ethereal Exchange workspace
-  channel_name: "#all-ethereal-exchange"
+  channel_id: C0CF5LJJTTP            # #etf-scanner, Ethereal Exchange workspace
+  channel_name: "#etf-scanner"
   levels: [SIGNAL]                   # add WATCH to also post new near-misses
 
 # ---------------------------------------------------------------- universe
-# underlying = what gets scanned. bull / bear = the leveraged ETFs to consider
-# trading when that underlying fires. Verify tickers with your broker; issuers
-# occasionally close, rename or reverse-split these funds.
+# underlying = what gets scanned.
+# bull = leveraged funds (TICKER: leverage) to look at on a bullish setup.
+# bear = inverse leveraged funds (TICKER: -leverage) to look at on a bearish setup.
+# Verify with your broker: issuers occasionally change a fund's leverage,
+# close it, rename it or reverse-split it.
 #
 # scan_targets: underlying | leveraged | both
 #   underlying is usually cleanest (more liquid, no decay noise in the chart).
@@ -93,36 +107,36 @@ scan_targets: underlying
 
 universe:
   # --- broad market
-  - {underlying: SPY,  name: S&P 500,             bull: [SPXL, UPRO, SSO], bear: [SPXS, SPXU, SDS]}
-  - {underlying: QQQ,  name: Nasdaq-100,          bull: [TQQQ, QLD],       bear: [SQQQ, QID]}
-  - {underlying: IWM,  name: Russell 2000,        bull: [TNA, UWM],        bear: [TZA, TWM]}
-  - {underlying: DIA,  name: Dow 30,              bull: [UDOW, DDM],       bear: [SDOW, DXD]}
+  - {underlying: SPY,  name: S&P 500,            bull: {SPXL: 3, UPRO: 3, SSO: 2}, bear: {SPXS: -3, SPXU: -3, SDS: -2}}
+  - {underlying: QQQ,  name: Nasdaq-100,         bull: {TQQQ: 3, QLD: 2},          bear: {SQQQ: -3, QID: -2}}
+  - {underlying: IWM,  name: Russell 2000,       bull: {TNA: 3, UWM: 2},           bear: {TZA: -3, TWM: -2}}
+  - {underlying: DIA,  name: Dow 30,             bull: {UDOW: 3, DDM: 2},          bear: {SDOW: -3, DXD: -2}}
   # --- sectors
-  - {underlying: SOXX, name: Semiconductors,      bull: [SOXL],            bear: [SOXS]}
-  - {underlying: XLK,  name: Technology,          bull: [TECL, ROM],       bear: [TECS]}
-  - {underlying: XLF,  name: Financials,          bull: [FAS, UYG],        bear: [FAZ, SKF]}
-  - {underlying: KRE,  name: Regional Banks,      bull: [DPST],            bear: []}
-  - {underlying: XLE,  name: Energy,              bull: [ERX, DIG],        bear: [ERY, DUG]}
-  - {underlying: XOP,  name: Oil & Gas E&P,       bull: [GUSH],            bear: [DRIP]}
-  - {underlying: XBI,  name: Biotech,             bull: [LABU],            bear: [LABD]}
-  - {underlying: XLV,  name: Health Care,         bull: [CURE, RXL],       bear: []}
-  - {underlying: XLI,  name: Industrials,         bull: [DUSL],            bear: []}
-  - {underlying: XLU,  name: Utilities,           bull: [UTSL],            bear: []}
-  - {underlying: XLY,  name: Consumer Disc.,      bull: [WANT],            bear: []}
-  - {underlying: XRT,  name: Retail,              bull: [RETL],            bear: []}
-  - {underlying: ITB,  name: Homebuilders,        bull: [NAIL],            bear: []}
-  - {underlying: IYR,  name: Real Estate,         bull: [URE],             bear: [SRS]}
-  - {underlying: XLRE, name: Real Estate Select,  bull: [DRN],             bear: [DRV]}
+  - {underlying: SOXX, name: Semiconductors,     bull: {SOXL: 3},                  bear: {SOXS: -3}}
+  - {underlying: XLK,  name: Technology,         bull: {TECL: 3, ROM: 2},          bear: {TECS: -3}}
+  - {underlying: XLF,  name: Financials,         bull: {FAS: 3, UYG: 2},           bear: {FAZ: -3, SKF: -2}}
+  - {underlying: KRE,  name: Regional Banks,     bull: {DPST: 3},                  bear: {}}
+  - {underlying: XLE,  name: Energy,             bull: {ERX: 2, DIG: 2},           bear: {ERY: -2, DUG: -2}}
+  - {underlying: XOP,  name: Oil & Gas E&P,      bull: {GUSH: 2},                  bear: {DRIP: -2}}
+  - {underlying: XBI,  name: Biotech,            bull: {LABU: 3},                  bear: {LABD: -3}}
+  - {underlying: XLV,  name: Health Care,        bull: {CURE: 3, RXL: 2},          bear: {}}
+  - {underlying: XLI,  name: Industrials,        bull: {DUSL: 3},                  bear: {}}
+  - {underlying: XLU,  name: Utilities,          bull: {UTSL: 3},                  bear: {}}
+  - {underlying: XLY,  name: Consumer Disc.,     bull: {WANT: 3},                  bear: {}}
+  - {underlying: XRT,  name: Retail,             bull: {RETL: 3},                  bear: {}}
+  - {underlying: ITB,  name: Homebuilders,       bull: {NAIL: 3},                  bear: {}}
+  - {underlying: IYR,  name: Real Estate,        bull: {URE: 2},                   bear: {SRS: -2}}
+  - {underlying: XLRE, name: Real Estate Select, bull: {DRN: 3},                   bear: {DRV: -3}}
   # --- rates / commodities
-  - {underlying: TLT,  name: 20+yr Treasuries,    bull: [TMF, UBT],        bear: [TMV, TBT]}
-  - {underlying: GLD,  name: Gold,                bull: [UGL],             bear: [GLL]}
-  - {underlying: GDX,  name: Gold Miners,         bull: [NUGT],            bear: [DUST]}
-  - {underlying: GDXJ, name: Junior Gold Miners,  bull: [JNUG],            bear: [JDST]}
-  - {underlying: SLV,  name: Silver,              bull: [AGQ],             bear: [ZSL]}
-  - {underlying: USO,  name: Crude Oil,           bull: [UCO],             bear: [SCO]}
-  - {underlying: UNG,  name: Natural Gas,         bull: [BOIL],            bear: [KOLD]}
+  - {underlying: TLT,  name: 20+yr Treasuries,   bull: {TMF: 3, UBT: 2},           bear: {TMV: -3, TBT: -2}}
+  - {underlying: GLD,  name: Gold,               bull: {UGL: 2},                   bear: {GLL: -2}}
+  - {underlying: GDX,  name: Gold Miners,        bull: {NUGT: 2},                  bear: {DUST: -2}}
+  - {underlying: GDXJ, name: Junior Gold Miners, bull: {JNUG: 2},                  bear: {JDST: -2}}
+  - {underlying: SLV,  name: Silver,             bull: {AGQ: 2},                   bear: {ZSL: -2}}
+  - {underlying: USO,  name: Crude Oil,          bull: {UCO: 2},                   bear: {SCO: -2}}
+  - {underlying: UNG,  name: Natural Gas,        bull: {BOIL: 2},                  bear: {KOLD: -2}}
   # --- international
-  - {underlying: FXI,  name: China Large-Cap,     bull: [YINN],            bear: [YANG]}
-  - {underlying: EEM,  name: Emerging Markets,    bull: [EDC],             bear: [EDZ]}
-  - {underlying: EWZ,  name: Brazil,              bull: [BRZU],            bear: []}
-  - {underlying: INDA, name: India,               bull: [INDL],            bear: []}
+  - {underlying: FXI,  name: China Large-Cap,    bull: {YINN: 3},                  bear: {YANG: -3}}
+  - {underlying: EEM,  name: Emerging Markets,   bull: {EDC: 3},                   bear: {EDZ: -3}}
+  - {underlying: EWZ,  name: Brazil,             bull: {BRZU: 2},                  bear: {}}
+  - {underlying: INDA, name: India,              bull: {INDL: 2},                  bear: {}}

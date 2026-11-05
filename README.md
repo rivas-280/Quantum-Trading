@@ -3,16 +3,18 @@
 ## ETF Signal Scanner (Claude Code skill)
 
 A Claude Code skill that scans ETFs with leveraged bull/bear versions for
-reversal setups, on a repeating schedule (every 15 min by default, configurable).
+reversal setups on the **1h, 2h, 4h and daily** charts, on a repeating schedule
+(every 15 min by default, configurable). When any timeframe triggers, the alert
+shows all four.
 
 | Side | RSI 7 & 14 | StochRSI (3,3,14,14) | MACD (8,21,5) | Bollinger (20,2) | Look at |
 |------|-----------|----------------------|---------------|------------------|---------|
-| Bullish | < 30 | %K & %D < 30 | MACD about to cross **above** signal | candle pierces lower band | bull ETF (SOXL, TQQQ, …) |
-| Bearish | > 70 | %K & %D > 70 | MACD about to cross **below** signal | candle pierces upper band | bear ETF (SOXS, SQQQ, …) |
+| Bullish | < 30 | %K & %D < 30 | MACD about to cross **above** signal | candle pierces lower band | leveraged (SOXL 3x, TQQQ 3x, …) |
+| Bearish | > 70 | %K & %D > 70 | MACD about to cross **below** signal | candle pierces upper band | inverse leveraged (SOXS 3x, SQQQ 3x, …) |
 
 All 4 = **SIGNAL**, 3 of 4 = **WATCH**. The default universe has 30 underlyings
 (SPY, QQQ, IWM, DIA, SOXX, XLK, XLF, XLE, XBI, TLT, GLD, GDX, USO, UNG, FXI, …),
-each mapped to its leveraged ETFs.
+each mapped to its leveraged and inverse leveraged funds and their multiples.
 
 ### Setup
 
@@ -41,9 +43,9 @@ alert is tagged **NEW** or ongoing so repeat runs only call out what changed.
 
 ### Slack alerts
 
-When a **new** SIGNAL fires during a Claude-run scan, the skill posts it to
-Slack through the Slack connector (default: `#all-ethereal-exchange` in the
-Ethereal Exchange workspace). Ongoing signals aren't re-posted. Change the
+When a timeframe newly hits SIGNAL during a Claude-run scan, the skill posts
+the ticker's full 1h/2h/4h/D table to `#etf-scanner` in the Ethereal Exchange
+workspace through the Slack connector. Ongoing signals aren't re-posted. Change the
 channel, add `WATCH` alerts, or turn it off under `slack:` in the config.
 
 ### Use it without Claude
@@ -51,13 +53,13 @@ channel, add `WATCH` alerts, or turn it off under `slack:` in the config.
 ```bash
 python3 .claude/skills/etf-signal-scanner/scripts/scan.py           # one scan
 python3 .claude/skills/etf-signal-scanner/scripts/scan.py --loop    # every interval_minutes, aligned to bar closes
-python3 .claude/skills/etf-signal-scanner/scripts/scan.py --json --all --force --tickers SOXX,SPY --timeframe 5m
+python3 .claude/skills/etf-signal-scanner/scripts/scan.py --json --all --force --tickers SOXX,SPY --timeframes 1h,1d
 ```
 
 ### Configuration
 
 Everything is in [`.claude/skills/etf-signal-scanner/config.yaml`](.claude/skills/etf-signal-scanner/config.yaml):
-loop interval, bar timeframe, indicator lengths, thresholds, how "about to cross"
+loop interval, chart timeframes, indicator lengths, thresholds, how "about to cross"
 is defined, Bollinger touch/close/cross mode, how many recent bars a condition
 may have fired in, and the ticker universe.
 

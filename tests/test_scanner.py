@@ -130,24 +130,69 @@ def test_disabled_condition_lowers_requirement(cfg):
     assert ev["enabled"] == 3 and ev["level"] == "SIGNAL"
 
 
-# ---------------------------------------------------------------- data / universe / timing
+# ---------------------------------------------------------------- bars / timeframes
 
-def test_drop_forming_bar():
-    idx = pd.DatetimeIndex([dt.datetime(2026, 11, 5, 10, 0, tzinfo=ET),
-                            dt.datetime(2026, 11, 5, 10, 15, tzinfo=ET)])
-    df = pd.DataFrame({"close": [1.0, 2.0]}, index=idx)
-    assert len(scan.drop_forming_bar(df, "15m", dt.datetime(2026, 11, 5, 10, 20, tzinfo=ET))) == 1
-    assert len(scan.drop_forming_bar(df, "15m", dt.datetime(2026, 11, 5, 10, 30, tzinfo=ET))) == 2
+def ts(h, m, day=5):
+    return pd.Timestamp(dt.datetime(2026, 11, day, h, m, tzinfo=ET))
 
 
-def test_build_targets_maps_leveraged_etfs(cfg):
+def test_bar_end_and_forming_bar():
+    assert scan.bar_end(ts(10, 30), "1h") == ts(11, 30)
+    assert scan.bar_end(ts(15, 30), "1h") == ts(16, 0)       # last 1h bar is 30 min
+    assert scan.bar_end(ts(13, 30), "4h") == ts(16, 0)
+    assert scan.bar_end(ts(9, 30), "1d") == ts(16, 0)
+    df = pd.DataFrame({"close": [1.0, 2.0]}, index=pd.DatetimeIndex([ts(10, 0), ts(10, 15)]))
+    assert len(scan.drop_forming_bar(df, "15m", ts(10, 20).to_pydatetime())) == 1
+    assert len(scan.drop_forming_bar(df, "15m", ts(10, 30).to_pydatetime())) == 2
+
+
+def hourly_day(day=5):
+    idx = pd.DatetimeIndex([ts(h, 30, day) for h in range(9, 16)])   # 09:30 ... 15:30
+    vals = np.arange(1, 8, dtype=float)
+    return pd.DataFrame({"open": vals, "high": vals + 0.5, "low": vals - 0.5,
+                         "close": vals + 0.25, "volume": 10.0}, index=idx)
+
+
+def test_resample_session_anchors_to_open():
+    h = hourly_day()
+    two = scan.resample_session(h, 120)
+    assert [t.strftime("%H:%M") for t in two.index] == ["09:30", "11:30", "13:30", "15:30"]
+    four = scan.resample_session(h, 240)
+    assert [t.strftime("%H:%M") for t in four.index] == ["09:30", "13:30"]
+    first = four.iloc[0]
+    assert (first.open, first.high, first.low, first.close, first.volume) == (1.0, 4.5, 0.5, 4.25, 40.0)
+    day = scan.resample_session(pd.concat([h, hourly_day(6)]), 1440)
+    assert len(day) == 2 and day.iloc[0].close == 7.25
+
+
+def test_configured_timeframes(cfg):
+    assert scan.configured_timeframes(cfg["data"]) == ["1h", "2h", "4h", "1d"]
+    assert scan.configured_timeframes({"timeframes": "1h, 1d"}) == ["1h", "1d"]
+    with pytest.raises(SystemExit):
+        scan.configured_timeframes({"timeframes": ["7h"]})
+
+
+# ---------------------------------------------------------------- universe
+
+def test_leveraged_and_inverse_labels(cfg):
     t = {x["ticker"]: x for x in scan.build_targets(cfg, None)}
-    assert t["SOXX"]["trade_bull"] == ["SOXL"] and t["SOXX"]["trade_bear"] == ["SOXS"]
+    assert t["SOXX"]["trade_bull"] == [{"ticker": "SOXL", "leverage": 3.0, "type": "leveraged"}]
+    assert t["SOXX"]["trade_bear"] == [{"ticker": "SOXS", "leverage": -3.0, "type": "inverse leveraged"}]
+    assert [scan.describe_etf(e) for e in t["SPY"]["trade_bear"]] == [
+        "SPXS (3x inverse leveraged)", "SPXU (3x inverse leveraged)", "SDS (2x inverse leveraged)"]
+    assert scan.describe_etf(t["XLE"]["trade_bull"][0]) == "ERX (2x leveraged)"
     assert "SOXL" not in t
+    # every fund in the universe has a leverage multiple
+    assert all(e["leverage"] for x in t.values() for e in x["trade_bull"] + x["trade_bear"])
+
+
+def test_leveraged_scan_mode_and_list_form(cfg):
     cfg["scan_targets"] = "both"
     t = {x["ticker"]: x for x in scan.build_targets(cfg, None)}
-    # bearish read on a bull ETF -> buy the inverse, bullish read on a bear ETF -> buy itself
-    assert t["SOXL"]["trade_bear"] == ["SOXS"] and t["SOXS"]["trade_bull"] == ["SOXS"]
+    # bearish read on a bull fund -> inverse funds; bullish read on an inverse fund -> itself
+    assert [e["ticker"] for e in t["SOXL"]["trade_bear"]] == ["SOXS"]
+    assert [e["ticker"] for e in t["SOXS"]["trade_bull"]] == ["SOXS"]
+    assert scan._etfs(["ABC"], True) == [{"ticker": "ABC", "leverage": None, "type": "inverse leveraged"}]
     only = scan.build_targets(cfg, {"QQQ", "ZZZZ"})
     assert {x["ticker"] for x in only} == {"QQQ", "ZZZZ"}
 
@@ -165,17 +210,87 @@ def test_loop_aligns_to_interval():
     assert scan.seconds_until_next_run(just_after, 15, True, 20) == 15
 
 
+# ---------------------------------------------------------------- alerts, state, Slack
+
+def tf_result(level=None, met=0):
+    ev = {"level": level, "met": met, "enabled": 4,
+          "conditions": {"rsi": met > 0, "stochrsi": met > 1, "macd": met > 2, "bollinger": met > 3},
+          "details": {"macd": {"met": met > 2, "state": "approaching", "bars_to_cross": 1.2}}}
+    none = {"level": None, "met": 0, "enabled": 4, "details": {},
+            "conditions": {"rsi": False, "stochrsi": False, "macd": False, "bollinger": False}}
+    return {"last_bar": "2026-11-05T13:30:00-05:00", "live": True, "price": 212.34,
+            "indicators": {"rsi7": 22.1, "rsi14": 27.5, "stoch_k": 8.2, "stoch_d": 11.0,
+                           "bb_lower": 211.8, "bb_upper": 220.0},
+            "bull": ev, "bear": none}
+
+
+def scan_with(levels: dict, ticker="SOXX"):
+    res = {"ticker": ticker, "name": "Semiconductors", "price": 212.34,
+           "trade_bull": [{"ticker": "SOXL", "leverage": 3.0, "type": "leveraged"}],
+           "trade_bear": [{"ticker": "SOXS", "leverage": -3.0, "type": "inverse leveraged"}],
+           "timeframes": {tf: tf_result(*lv) for tf, lv in levels.items()}}
+    return {"timeframes": list(levels), "results": [res]}
+
+
+def run_state(cfg, levels, minute):
+    s = scan_with(levels)
+    scan.apply_state(s, cfg, True, dt.datetime(2026, 11, 5, 10, minute, tzinfo=ET))
+    return s
+
+
+def test_state_new_ongoing_upgrade_and_cooldown(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, "STATE_FILE", tmp_path / "state.json")
+    quiet, watch, sig = (None, 0), ("WATCH", 3), ("SIGNAL", 4)
+    s = run_state(cfg, {"1h": sig, "2h": quiet, "4h": watch, "1d": quiet}, 0)
+    a = s["alerts"][0]
+    assert a["level"] == "SIGNAL" and a["new"] and sorted(a["new_triggers"]) == ["1h", "4h"]
+    assert set(a["timeframes"]) == {"1h", "2h", "4h", "1d"}           # all timeframes shown
+    s = run_state(cfg, {"1h": sig, "2h": quiet, "4h": watch, "1d": quiet}, 15)
+    assert not s["alerts"][0]["new"]                                     # ongoing
+    s = run_state(cfg, {"1h": sig, "2h": quiet, "4h": sig, "1d": quiet}, 30)
+    assert s["alerts"][0]["new_triggers"] == ["4h"]                      # WATCH -> SIGNAL upgrade
+    s = run_state(cfg, {"1h": quiet, "2h": quiet, "4h": sig, "1d": quiet}, 45)
+    assert s["cleared"] == []                                            # 1h cooling down
+    s = run_state(cfg, {"1h": sig, "2h": quiet, "4h": sig, "1d": quiet}, 50)
+    assert not s["alerts"][0]["new"]                                     # flicker, not new
+    run_state(cfg, {"1h": quiet, "2h": quiet, "4h": quiet, "1d": quiet}, 51)
+    s = scan_with({"1h": quiet, "2h": quiet, "4h": quiet, "1d": quiet})
+    scan.apply_state(s, cfg, True, dt.datetime(2026, 11, 5, 12, 0, tzinfo=ET))
+    assert s["cleared"] == ["SOXX:bull:1h", "SOXX:bull:4h"]
+
+
+def test_notification_shows_all_timeframes_and_labels(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, "STATE_FILE", tmp_path / "state.json")
+    s = run_state(cfg, {"1h": ("WATCH", 3), "2h": (None, 1), "4h": (None, 0), "1d": (None, 0)}, 0)
+    assert scan.build_notification(s, cfg) is None                       # WATCH not in levels
+    s = run_state(cfg, {"1h": ("WATCH", 3), "2h": ("SIGNAL", 4), "4h": (None, 0), "1d": (None, 0)}, 15)
+    note = scan.build_notification(s, cfg)
+    assert note["channel_id"] == "C0CF5LJJTTP" and note["count"] == 1
+    msg = note["messages"][0]
+    assert "BULLISH SIGNAL: SOXX" in msg and "triggered on 1h, 2h (new)" in msg
+    assert "Leveraged: **SOXL (3x leveraged)**" in msg
+    for tf in ("| 1h ★ |", "| 2h ★ |", "| 4h |", "| 1d |"):
+        assert tf in msg
+    assert "13:30 live" in msg
+    s = run_state(cfg, {"1h": ("WATCH", 3), "2h": ("SIGNAL", 4), "4h": (None, 0), "1d": (None, 0)}, 30)
+    assert scan.build_notification(s, cfg) is None                       # already posted
+    cfg["slack"]["enabled"] = False
+    assert scan.build_notification(s, cfg) is None
+
+
 # ---------------------------------------------------------------- end to end (offline)
 
 def test_end_to_end_csv(tmp_path, cfg, monkeypatch, capsys):
     rng = np.random.default_rng(3)
-    idx = pd.date_range("2026-10-01 09:30", periods=400, freq="15min", tz=ET)
+    days = pd.bdate_range("2026-06-01", periods=110)
+    idx = pd.DatetimeIndex([pd.Timestamp(f"{d.date()} 09:30", tz=ET) + pd.Timedelta(minutes=15 * k)
+                            for d in days for k in range(26)])
     close = 100 * np.exp(np.cumsum(rng.normal(0, 0.003, len(idx))))
     df = pd.DataFrame({"datetime": idx, "open": close, "high": close * 1.002,
                        "low": close * 0.998, "close": close, "volume": 1000})
     df.to_csv(tmp_path / "SPY.csv", index=False)
 
-    cfg["data"].update(source="csv", csv_dir=str(tmp_path), closed_bars_only=False)
+    cfg["data"].update(source="csv", csv_dir=str(tmp_path))
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(json.dumps(cfg))  # JSON is valid YAML
     monkeypatch.setattr(scan, "STATE_FILE", tmp_path / "state.json")
@@ -184,35 +299,20 @@ def test_end_to_end_csv(tmp_path, cfg, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["tickers_scanned"] == 1 and not out["errors"]
     res = out["results"][0]
-    assert res["bull"]["trade"] == ["SPXL", "UPRO", "SSO"]
-    assert res["bear"]["trade"] == ["SPXS", "SPXU", "SDS"]
-    assert 0 <= res["indicators"]["rsi7"] <= 100
+    assert list(res["timeframes"]) == ["1h", "2h", "4h", "1d"]
+    assert res["timeframes"]["4h"]["bars"] == 2 * 110 and res["timeframes"]["1d"]["bars"] == 110
+    assert [e["ticker"] for e in res["trade_bull"]] == ["SPXL", "UPRO", "SSO"]
+    assert all(0 <= r["indicators"]["rsi7"] <= 100 for r in res["timeframes"].values())
 
     assert scan.main(["--config", str(cfg_path), "--tickers", "SPY", "--force", "--all"]) == 0
     assert "ETF Signal Scan" in capsys.readouterr().out
 
 
-# ---------------------------------------------------------------- Slack notification
-
-def _alert(level, new, direction="bull", ticker="SOXX"):
-    return {"ticker": ticker, "name": "Semiconductors", "direction": direction, "level": level,
-            "new": new, "met": 4, "enabled": 4,
-            "conditions": {"rsi": True, "stochrsi": True, "macd": True, "bollinger": True},
-            "macd": {"met": True, "state": "approaching", "bars_to_cross": 1.2},
-            "trade": ["SOXL"], "price": 212.34, "last_bar": "2026-11-05T10:30:00-05:00",
-            "indicators": {"rsi7": 22.1, "rsi14": 27.5, "stoch_k": 8.2, "stoch_d": 11.0,
-                           "bb_lower": 211.8, "bb_upper": 220.0}}
-
-
-def test_notification_only_for_new_alerts_at_configured_levels(cfg):
-    scan_out = {"timeframe": "15m", "alerts": [_alert("SIGNAL", False), _alert("WATCH", True, ticker="XLF")]}
-    assert scan.build_notification(scan_out, cfg) is None   # ongoing SIGNAL, WATCH not configured
-    scan_out["alerts"].append(_alert("SIGNAL", True, ticker="QQQ"))
-    note = scan.build_notification(scan_out, cfg)
-    assert note["count"] == 1 and note["channel_id"] == cfg["slack"]["channel_id"]
-    assert "BULLISH SIGNAL: QQQ" in note["message"] and "SOXL" in note["message"]
-    assert "XLF" not in note["message"] and "bar 10:30 ET" in note["message"]
-    cfg["slack"]["levels"] = ["SIGNAL", "WATCH"]
-    assert scan.build_notification(scan_out, cfg)["count"] == 2
-    cfg["slack"]["enabled"] = False
-    assert scan.build_notification(scan_out, cfg) is None
+def test_unadjusted_split_is_rejected():
+    idx = pd.date_range("2026-10-01", periods=30, freq="D", tz=ET)
+    close = np.r_[np.full(27, 150.0), [450.0, 455.0, 150.0]]
+    bars = pd.DataFrame({"close": close}, index=idx)
+    with pytest.raises(RuntimeError, match="unadjusted split"):
+        scan.check_price_jumps(bars, 0.4)
+    scan.check_price_jumps(bars.iloc[:27], 0.4)        # clean data passes
+    scan.check_price_jumps(bars, 0)                    # disabled

@@ -8,15 +8,18 @@ allowed-tools: Bash(python3 .claude/skills/etf-signal-scanner/scripts/scan.py:*)
 # ETF Signal Scanner
 
 Finds reversal setups on ETFs that have leveraged versions, and points to the
-leveraged ETF to trade:
+leveraged ETFs to look at. Every ticker is checked on the 1h, 2h, 4h and daily
+charts (scanning every 15 minutes); when any timeframe triggers, the alert shows
+all of them.
 
 | Side | RSI 7 & 14 | StochRSI %K & %D | MACD (8,21,5) | Bollinger (20,2) | Leveraged ETF |
 |------|-----------|------------------|---------------|------------------|-----------------|
-| Bullish | < 30 | < 30 | about to cross **above** signal (or just did) | candle pierces **below** lower band | bull (e.g. SOXL) |
-| Bearish | > 70 | > 70 | about to cross **below** signal (or just did) | candle pierces **above** upper band | bear (e.g. SOXS) |
+| Bullish | < 30 | < 30 | about to cross **above** signal (or just did) | candle pierces **below** lower band | leveraged (e.g. SOXL 3x) |
+| Bearish | > 70 | > 70 | about to cross **below** signal (or just did) | candle pierces **above** upper band | inverse leveraged (e.g. SOXS 3x) |
 
-4/4 conditions = **SIGNAL**, 3/4 = **WATCH**. All thresholds, lengths, the bar
-timeframe, the loop interval and the ticker universe are in
+4/4 conditions = **SIGNAL**, 3/4 = **WATCH**, judged per timeframe. All
+thresholds, lengths, timeframes, the loop interval and the ticker universe
+(with each fund's leverage) are in
 `.claude/skills/etf-signal-scanner/config.yaml`.
 
 ## Arguments (`$ARGUMENTS`)
@@ -42,24 +45,29 @@ timeframe, the loop interval and the ticker universe are in
    the market is closed and the scan was skipped. Do nothing else (this matters
    when looping, so overnight runs stay quiet).
 
-3. Otherwise read `alerts` (already sorted SIGNAL before WATCH, new first) and report:
-   - **New SIGNALs first.** For each: ticker, direction, price, RSI 7/14,
-     StochRSI K/D, MACD state (`bars_to_cross` or `bars_since_cross`), which band
-     was pierced, and the leveraged ETFs in `trade`.
-   - Then new WATCH items in one line each, naming the missing condition
-     (the `conditions` entry that is `false`).
+3. Otherwise read `alerts` (one per ticker + direction, sorted SIGNAL before
+   WATCH, new first). `triggers` maps each triggering timeframe to its level,
+   `new_triggers` lists the ones that are new this scan, and `timeframes` holds
+   every timeframe's status (`level`, `met`/`enabled`, `conditions`, `macd`,
+   `indicators`, `live` = still-forming bar). Report:
+   - **New SIGNALs first.** For each: ticker, direction, price, which
+     timeframes triggered, a compact line per timeframe (status, RSI 7/14,
+     StochRSI K/D, MACD state), and the funds in `trade`, each labelled
+     leveraged or inverse leveraged with its multiple (e.g. "SOXL 3x leveraged").
+   - Then new WATCH items in one line each: ticker, timeframes, missing condition.
    - Ongoing alerts (`"new": false`) as one compact line, and `cleared` keys if any.
-   - If there are no alerts: one line, e.g. "No setups on 30 ETFs (15m, bar 10:30 ET)."
-   - Mention `errors` briefly (ticker + reason) if present; do not retry them.
+   - If there are no alerts: one line, e.g. "No setups on 30 ETFs (1h/2h/4h/D)."
+   - Mention `errors` briefly (ticker, timeframe, reason) if present; do not retry them.
    Keep looping reports short: a few lines unless something new fired.
 
-4. **Slack alert.** If the JSON's `notify` is not null, send `notify.message`
-   unchanged with the Slack `slack_send_message` tool to `notify.channel_id`
-   (load it with ToolSearch if needed), then add the message link to your report.
-   Send exactly one message per scan and only when `notify` is present: the
-   scanner already limits it to alerts that are new this scan at the levels in
-   `config.yaml` → `slack.levels`, so ongoing alerts are never re-posted. If the
-   send fails, say so in one line and carry on; do not retry or post elsewhere.
+4. **Slack alert.** If the JSON's `notify` is not null, send each string in
+   `notify.messages` unchanged, one Slack message each, with the
+   `slack_send_message` tool to `notify.channel_id` (load it with ToolSearch if
+   needed), then add the message links to your report. Send only when `notify`
+   is present: the scanner already limits it to tickers with a timeframe that is
+   newly triggered at the levels in `config.yaml` → `slack.levels`, so ongoing
+   alerts are never re-posted. If a send fails, say so in one line and carry
+   on; do not retry or post elsewhere.
    Never post when the market is closed or when `notify` is null.
 
 5. Do not place trades or tell the user to buy anything. Present setups as
@@ -90,13 +98,15 @@ which waits for each bar to close and rescans every `interval_minutes`.
 When the user asks to change thresholds, timeframe, interval, tickers or rules,
 edit `config.yaml` (it is commented) rather than the script. Useful knobs:
 
-- `data.timeframe`: bar size (15m default; 5m, 1h, 1d, ...).
+- `data.timeframes`: charts to evaluate (default `[1h, 2h, 4h, 1d]`; 2h/3h/4h are
+  built from 1h bars). `data.closed_bars_only` (default false) controls whether
+  the still-forming bar counts.
 - `rules.window_bars`: how many recent bars RSI/StochRSI/band conditions may
   have fired in (default 3; 1 = all on the latest bar).
 - `rules.rsi.require`: `all` (RSI 7 **and** 14) or `any`.
 - `rules.macd.lookahead_bars` / `max_bars_since_cross`: how close or how recent the cross must be.
 - `rules.bollinger.mode`: `touch` (wick), `close`, or `cross`.
 - `scan_targets`: `underlying` (default), `leveraged`, or `both`.
-- `universe`: add or remove `{underlying, bull, bear}` entries.
+- `universe`: add or remove `{underlying, bull: {TICKER: leverage}, bear: {TICKER: -leverage}}` entries.
 - `slack.channel_id` / `slack.levels` / `slack.enabled`: where Slack alerts go, which
   levels trigger them (`[SIGNAL]` by default, add `WATCH` for near-misses), or turn them off.
