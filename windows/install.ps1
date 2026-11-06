@@ -1,0 +1,146 @@
+<#
+  ETF Signal Scanner - Windows installer.
+
+  Run from an *Administrator* PowerShell window, in the repository folder:
+
+      powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
+
+  What it does (safe to run again; it updates the existing install):
+    1. Finds Python 3.11+ (offers to install it with winget if missing)
+    2. Creates a private Python environment and installs the scanner's packages
+    3. Saves your Slack webhook URL and posts a test message
+    4. Optionally stops this PC from sleeping while plugged in
+    5. Registers the scheduled task "ETF Signal Scanner", which starts the scanner
+       at boot (whether or not you're logged in), restarts it if it crashes, and
+       re-checks every 15 minutes that it's still running
+    6. Starts it now
+#>
+#Requires -RunAsAdministrator
+$ErrorActionPreference = "Stop"
+
+$Repo     = Split-Path -Parent $PSScriptRoot
+$Skill    = Join-Path $Repo ".claude\skills\etf-signal-scanner"
+$Script   = Join-Path $Skill "scripts\scan.py"
+$Reqs     = Join-Path $Skill "requirements.txt"
+$Venv     = Join-Path $Skill ".venv"
+$Py       = Join-Path $Venv "Scripts\python.exe"
+$Webhook  = Join-Path $Skill "slack_webhook_url.txt"
+$LogDir   = Join-Path $Skill "logs"
+$Log      = Join-Path $LogDir "scanner.log"
+$TaskName = "ETF Signal Scanner"
+
+function Step($n, $text) { Write-Host "`n[$n/6] $text" -ForegroundColor Cyan }
+function Fail($text) { Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
+
+if (-not (Test-Path $Script)) { Fail "Can't find $Script. Run this from inside the Quantum-Trading folder." }
+
+# ------------------------------------------------------------------ 1. Python
+Step 1 "Checking for Python 3.11 or newer"
+function Find-Python {
+    $candidates = @()
+    if (Get-Command py -ErrorAction SilentlyContinue)     { $candidates += ,@("py", "-3") }
+    if (Get-Command python -ErrorAction SilentlyContinue) { $candidates += ,@("python") }
+    foreach ($c in $candidates) {
+        $exe = $c[0]; $extra = @($c | Select-Object -Skip 1)
+        try {
+            $ok = & $exe @extra -c "import sys; print(int(sys.version_info >= (3, 11)))" 2>$null
+            if ("$ok".Trim() -eq "1") { return ,$c }
+        } catch { }
+    }
+    return $null
+}
+$base = Find-Python
+if (-not $base) {
+    Write-Host "Python 3.11+ was not found."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        $ans = Read-Host "Install Python 3.12 now with winget? (Y/n)"
+        if ($ans -ne "n") {
+            winget install -e --id Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
+            Write-Host "`nPython installed. Close this window, open a new Administrator PowerShell, and run the installer again." -ForegroundColor Yellow
+            exit 0
+        }
+    }
+    Fail "Install Python 3.12 from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run this again."
+}
+$baseExe = $base[0]; $baseArgs = @($base | Select-Object -Skip 1)
+Write-Host ("Using " + (& $baseExe @baseArgs --version))
+
+# ------------------------------------------------------------------ 2. packages
+Step 2 "Installing the scanner's Python packages (first run takes a few minutes)"
+if (-not (Test-Path $Py)) {
+    & $baseExe @baseArgs -m venv $Venv
+    if ($LASTEXITCODE -ne 0) { Fail "Couldn't create the Python environment in $Venv" }
+}
+& $Py -m pip install --upgrade pip --quiet
+& $Py -m pip install -r $Reqs --quiet
+if ($LASTEXITCODE -ne 0) { Fail "Package install failed (see the messages above)." }
+& $Py $Script --help > $null
+if ($LASTEXITCODE -ne 0) { Fail "The scanner didn't start; see the error above." }
+Write-Host "Packages installed."
+
+# ------------------------------------------------------------------ 3. Slack
+Step 3 "Slack webhook"
+$current = if (Test-Path $Webhook) { (Get-Content $Webhook -Raw).Trim() } else { "" }
+if ($current) {
+    $ans = Read-Host "A webhook URL is already saved. Replace it? (y/N)"
+    if ($ans -eq "y") { $current = "" }
+}
+while (-not $current) {
+    $url = (Read-Host "Paste the Slack incoming-webhook URL for #etf-scanner (starts with https://hooks.slack.com/)").Trim()
+    if ($url -match '^https://hooks\.slack\.com/') { $current = $url } else { Write-Host "That doesn't look like a Slack webhook URL; try again." }
+}
+Set-Content -Path $Webhook -Value $current -NoNewline -Encoding ascii
+& $Py $Script --test-slack
+if ($LASTEXITCODE -ne 0) { Fail "Slack test post failed. Check the webhook URL and run the installer again." }
+
+# ------------------------------------------------------------------ 4. sleep
+Step 4 "Power settings"
+$ans = Read-Host "Stop this PC from sleeping or hibernating while plugged in, so scans don't pause? (Y/n)"
+if ($ans -ne "n") {
+    powercfg /change standby-timeout-ac 0
+    powercfg /change hibernate-timeout-ac 0
+    Write-Host "Sleep disabled on AC power. (On a laptop, also set 'When I close the lid' to 'Do nothing'.)"
+} else {
+    Write-Host "Skipped. Scans pause whenever the PC sleeps."
+}
+
+# ------------------------------------------------------------------ 5. scheduled task
+Step 5 "Registering the scheduled task '$TaskName'"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$cmdLine  = "`"$Py`" -u `"$Script`" --loop --post-slack >> `"$Log`" 2>&1"
+$action   = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$cmdLine`"" -WorkingDirectory $Repo
+$triggers = @(
+    (New-ScheduledTaskTrigger -AtStartup),
+    # Re-check every 15 minutes: if the scanner isn't running, this starts it
+    # (if it is running, MultipleInstances=IgnoreNew makes this a no-op).
+    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 15))
+)
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+# S4U = runs whether or not you're logged in, without storing your password.
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+}
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Settings $settings `
+    -Principal $principal -Force `
+    -Description "Scans leveraged-ETF underlyings every 15 min and posts signals to Slack #etf-scanner." | Out-Null
+Write-Host "Task registered."
+
+# ------------------------------------------------------------------ 6. start
+Step 6 "Starting the scanner"
+Start-ScheduledTask -TaskName $TaskName
+Start-Sleep -Seconds 20
+$state = (Get-ScheduledTask -TaskName $TaskName).State
+Write-Host "Task state: $state"
+if (Test-Path $Log) { Write-Host "`nLast log lines:"; Get-Content $Log -Tail 5 }
+Write-Host @"
+
+Done. The scanner now runs on its own:
+  - It posts 'ETF scanner started' to #etf-scanner each time it starts, alerts for new
+    SIGNALs, a message when it stops for the day, and data-outage notices.
+  - Log file:   $Log
+  - Status:     powershell -ExecutionPolicy Bypass -File .\windows\status.ps1
+  - Uninstall:  powershell -ExecutionPolicy Bypass -File .\windows\uninstall.ps1  (as Administrator)
+"@ -ForegroundColor Green
