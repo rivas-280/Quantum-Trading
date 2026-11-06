@@ -17,7 +17,14 @@ post_close_delay_seconds: 20
 
 # ---------------------------------------------------------------- data
 data:
-  source: yfinance       # yfinance (recommended) | yahoo (direct HTTP, often rate-limited) | csv
+  # webull = Webull OpenAPI (needs webull_credentials.yaml, an approved login and an
+  #          OpenAPI market-data subscription; uses Webull's own 1h/2h/4h/D candles)
+  # yfinance | yahoo (direct HTTP, often rate-limited) | csv
+  source: webull
+  # If Webull data fails (login needs approval, not subscribed, outage), scan with this
+  # instead and post a one-time Slack notice. Remove the line to skip the scan instead.
+  fallback_source: yfinance
+  webull_bars: 600       # candles requested per timeframe from Webull (max 1200)
   # Chart timeframes every ticker is evaluated on. When any of them triggers,
   # the alert shows all of them. 2h / 3h / 4h are built from 1h bars anchored
   # to the 09:30 ET open. Also supported: 1m 2m 5m 15m 30m 1h 1d.

@@ -4,3 +4,4 @@ PyYAML>=6.0
 requests>=2.28
 yfinance>=0.2
 tzdata>=2024.1   # time-zone data; needed on Windows
+webull-openapi-python-sdk>=3.0   # Webull OpenAPI market data (data.source: webull)

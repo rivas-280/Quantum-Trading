@@ -35,6 +35,7 @@ RSI_COLORS = ["#f6c85f", "#c77dff", "#5b9cf6"]
 K_COLOR, D_COLOR = "#5b9cf6", "#ff9800"
 MACD_COLOR, SIGNAL_COLOR = "#5b9cf6", "#ff9800"
 HIST_UP, HIST_UP_FADE, HIST_DOWN, HIST_DOWN_FADE = "#26a69a", "#b2dfdb", "#ef5350", "#ffcdd2"
+AMBER = "#f0b429"
 
 RIGHT_AXIS, BOTTOM_AXIS, LEFT_PAD = 76, 26, 8
 PANES = [("price", 0.52), ("rsi", 0.16), ("stoch", 0.16), ("macd", 0.16)]
@@ -130,11 +131,24 @@ def load_chart(ticker: str, tf: str) -> dict:
     import scan                                    # pandas / yfinance: imported on first chart only
     cfg = scan.load_config(scan.DEFAULT_CONFIG)
     data_cfg = dict(cfg["data"])
-    session = None
-    if data_cfg.get("source", "yfinance") == "yahoo":
-        import requests
-        session = requests.Session()
-    bars = scan.load_bars(ticker, [tf], data_cfg, session)[tf]
+    data_cfg["webull_bars"] = max(int(data_cfg.get("webull_bars", 600)), 1000)   # more history to scroll back
+    note = None
+
+    def fetch(dc):
+        session = None
+        if dc.get("source", "yfinance") == "yahoo":
+            import requests
+            session = requests.Session()
+        return scan.load_bars(ticker, [tf], dc, session)[tf]
+    try:
+        bars = fetch(data_cfg)
+    except Exception as exc:
+        fallback = data_cfg.get("fallback_source")
+        if data_cfg.get("source") != "webull" or not fallback:
+            raise
+        note = f"Webull unavailable ({exc}); showing {fallback} data"
+        data_cfg["source"] = fallback
+        bars = fetch(data_cfg)
     if bars is None or bars.empty:
         raise RuntimeError(f"no {tf} data for {ticker}")
     df = scan.compute_indicators(bars, cfg["indicators"])
@@ -143,6 +157,7 @@ def load_chart(ticker: str, tf: str) -> dict:
         verdict = scan.analyze(bars, cfg)
     out = {"ticker": ticker, "tf": tf, "df": df, "verdict": verdict, "cfg": cfg,
            "rsi_lengths": [int(x) for x in cfg["indicators"]["rsi"]["lengths"]],
+           "source": data_cfg.get("source", "yfinance"), "source_note": note,
            "loaded": time.time()}
     _cache[(ticker, tf)] = (time.time(), out)
     return out
@@ -283,9 +298,13 @@ class ChartWindow(tk.Toplevel):
         else:
             self.verdict_lbl.configure(text="Not enough candles on this timeframe for the scanner's rules.", fg=MUTED)
         when = dt.datetime.fromtimestamp(self.data["loaded"]).strftime("%H:%M:%S")
+        names = {"webull": "Webull", "yfinance": "Yahoo Finance", "yahoo": "Yahoo Finance", "csv": "CSV files"}
+        src = names.get(self.data.get("source"), self.data.get("source") or "?")
+        note = self.data.get("source_note")
         self.status_lbl.configure(
-            text=f"{len(df)} candles · last {df.index[-1]:%a %b %d %H:%M} ET · loaded {when} · "
-                 "wheel = zoom, drag = pan, Home = latest, 1-5 = timeframe", fg=MUTED)
+            text=(f"⚠ {note}  ·  " if note else "") +
+                 f"Data: {src} · {len(df)} candles · last {df.index[-1]:%a %b %d %H:%M} ET · loaded {when} · "
+                 "wheel = zoom, drag = pan, Home = latest, 1-5 = timeframe", fg=AMBER if note else MUTED)
 
     # ---- view changes
     def _plot_box(self):

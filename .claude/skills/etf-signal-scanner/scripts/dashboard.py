@@ -35,6 +35,10 @@ REPO_DIR = SKILL_DIR.parent.parent.parent
 CONTROL_FILE = SKILL_DIR / "state" / "control.json"
 DASHBOARD_FILE = SKILL_DIR / "state" / "dashboard.json"
 LOG_FILE = SKILL_DIR / "logs" / "scanner.log"
+SCAN_SCRIPT = SKILL_DIR / "scripts" / "scan.py"
+WEBULL_LOGIN_FILE = SKILL_DIR / "state" / "webull_login.json"
+WEBULL_TOKEN_FILE = SKILL_DIR / "state" / "webull_token" / "token.txt"
+SOURCE_NAMES = {"webull": "Webull", "yfinance": "Yahoo Finance", "yahoo": "Yahoo Finance", "csv": "CSV files"}
 ICON_FILE = REPO_DIR / "windows" / "etf-scanner.ico"
 TASK_NAME = "ETF Signal Scanner"
 ET = ZoneInfo("America/New_York")
@@ -223,19 +227,21 @@ class Dashboard(tk.Tk):
         self.btn_pause = ttk.Button(buttons, text="❚❚  Pause", style="Big.TButton", command=self.pause)
         self.btn_scan = ttk.Button(buttons, text="⟳  Scan now", style="Big.TButton", command=self.scan_now)
         self.btn_log = ttk.Button(buttons, text="Open log", command=self.open_log)
-        for i, b in enumerate((self.btn_start, self.btn_pause, self.btn_scan, self.btn_log)):
+        self.btn_webull = ttk.Button(buttons, text="Connect Webull", command=self.connect_webull)
+        self.login_proc = None
+        for i, b in enumerate((self.btn_start, self.btn_pause, self.btn_scan, self.btn_log, self.btn_webull)):
             b.grid(row=0, column=i, padx=(0, 8))
 
         info = ttk.Frame(self, padding=(14, 6, 14, 6))
         info.pack(fill="x")
         self.info: dict[str, ttk.Label] = {}
-        for r, key in enumerate(("Last check", "Next check", "Last market scan", "Slack")):
+        for r, key in enumerate(("Last check", "Next check", "Last market scan", "Data", "Slack")):
             ttk.Label(info, text=key + ":", font=("Segoe UI", 10, "bold")).grid(row=r, column=0, sticky="w", padx=(0, 10))
             lbl = ttk.Label(info, text="")
             lbl.grid(row=r, column=1, sticky="w")
             self.info[key] = lbl
         self.notice_lbl = ttk.Label(info, text="", foreground=BLUE)
-        self.notice_lbl.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.notice_lbl.grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         body = ttk.PanedWindow(self, orient="vertical")
         body.pack(fill="both", expand=True, padx=14, pady=(4, 6))
@@ -360,6 +366,57 @@ class Dashboard(tk.Tk):
             break
         self.charts[ticker] = chart.ChartWindow(self, ticker, row.get("name", ""), tf=tf)
 
+    def connect_webull(self):
+        """Run `scan.py --webull-login` in the background: it asks Webull for a login,
+        waits while you approve it in the Webull app, then checks data access."""
+        if self.login_proc and self.login_proc.poll() is None:
+            return
+        try:
+            WEBULL_LOGIN_FILE.unlink(missing_ok=True)
+            self.login_proc = subprocess.Popen([sys.executable, str(SCAN_SCRIPT), "--webull-login"],
+                                               cwd=str(REPO_DIR), creationflags=NO_WINDOW,
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            messagebox.showerror("ETF Scanner", f"Couldn't start the Webull login: {exc}")
+            return
+        self.btn_webull.state(["disabled"])
+        self.say("Connecting to Webull… if the Webull app shows an OpenAPI login request, approve it "
+                 "(waiting up to 5 minutes).", BLUE, 330)
+        self.after(1000, self._check_login)
+
+    def _check_login(self):
+        if self.login_proc and self.login_proc.poll() is None:
+            self.after(1000, self._check_login)
+            return
+        self.btn_webull.state(["!disabled"])
+        r = read_json(WEBULL_LOGIN_FILE)
+        if r.get("ok"):
+            exp = parse_time(r.get("token_expires"))
+            self.say(f"Webull {r.get('message', 'connected')}" + (f"; login valid until {when(exp)}." if exp else "."),
+                     GREEN, 60)
+        else:
+            self.say(f"Webull: {r.get('message') or 'the login did not finish'}", RED, 120)
+
+    def _data_text(self, s: dict) -> tuple[str, str]:
+        src, wanted, err = s.get("source"), s.get("requested_source"), s.get("source_error")
+        if not src:
+            if s.get("scanned_at"):
+                return "Yahoo Finance (last scan was made before the Webull switch; restart the scanner to use Webull)", ""
+            return "no scan yet", ""
+        text = SOURCE_NAMES.get(src, src)
+        if wanted == "webull" and err:
+            return f"{text} (Webull unavailable: {err[:160]})", RED
+        if src == "webull":
+            try:
+                exp = dt.datetime.fromtimestamp(int(WEBULL_TOKEN_FILE.read_text().splitlines()[1]) / 1000, tz=ET)
+                days = (exp - now_et()).total_seconds() / 86400
+                text += f"  ·  login valid until {when(exp)}"
+                if days < 2:
+                    return text + " - press Connect Webull soon to renew it", AMBER
+            except (OSError, IndexError, ValueError):
+                pass
+        return text, ""
+
     def open_log(self):
         if not LOG_FILE.exists():
             messagebox.showinfo("ETF Scanner", f"No log yet at\n{LOG_FILE}")
@@ -442,6 +499,8 @@ class Dashboard(tk.Tk):
                 f"{s.get('error_count', 0)} error(s)" + ("  ·  from Scan now" if s.get("forced") else "")))
         else:
             self.info["Last market scan"].configure(text="none yet (scans run during market hours or with Scan now)")
+        data_text, data_color = self._data_text(s)
+        self.info["Data"].configure(text=data_text, foreground=data_color)
         if d:
             self.info["Slack"].configure(
                 text="posting alerts and status messages via the saved webhook" if d.get("slack_webhook")
