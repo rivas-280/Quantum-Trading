@@ -22,5 +22,13 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 } else {
     Write-Host "No scheduled task named '$TaskName' was found."
 }
+# Stop-ScheduledTask only kills the cmd.exe wrapper; python.exe keeps scanning
+# (and posting) on its own, so kill every scanner process too.
+$stray = @(Get-CimInstance Win32_Process | Where-Object {
+    $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like "*$Script*" })
+if ($stray.Count) {
+    $stray | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Write-Host "Stopped $($stray.Count) scanner process(es)."
+}
 # The scanner was killed rather than closed, so post its stop message for it.
 if (Test-Path $Py) { & $Py $Script --announce stop }
