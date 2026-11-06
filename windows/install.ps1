@@ -123,6 +123,16 @@ $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
+# Stop-ScheduledTask only kills the cmd.exe wrapper; python.exe keeps running
+# (and keeps scanner.log locked, so the new task can't start). Kill any scanner
+# left over from an earlier install, uninstall or manual run.
+$stray = @(Get-CimInstance Win32_Process | Where-Object {
+    $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like "*$Script*" })
+if ($stray.Count) {
+    $stray | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 2
+    Write-Host "Stopped $($stray.Count) leftover scanner process(es)."
+}
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Settings $settings `
     -Principal $principal -Force `
     -Description "Scans leveraged-ETF underlyings every 15 min and posts signals to Slack #etf-scanner." | Out-Null

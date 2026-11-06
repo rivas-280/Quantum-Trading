@@ -18,4 +18,14 @@ if (Test-Path $Status) {
     $s = Get-Content $Status -Raw | ConvertFrom-Json
     Write-Host "Last scan:    $($s.last_scan)   in session: $($s.running)   data outage: $($s.outage)"
 }
+if ($task.State -ne "Running" -and (Test-Path $Log)) {
+    # If something still holds the log open while the task isn't running, an
+    # orphaned scanner from an earlier install is running outside the task and
+    # blocks it from starting (it exits with result 1).
+    try { [IO.File]::Open($Log, "Append", "Write", "Read").Close() }
+    catch {
+        Write-Host ("`nA scanner is running outside the scheduled task and is blocking it. " +
+                    "Run install.ps1 again as Administrator to clean it up.") -ForegroundColor Red
+    }
+}
 if (Test-Path $Log) { Write-Host "`nLast 15 log lines:"; Get-Content $Log -Tail 15 }
