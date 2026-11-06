@@ -36,6 +36,21 @@ function Fail($text) { Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
 
 if (-not (Test-Path $Script)) { Fail "Can't find $Script. Run this from inside the Quantum-Trading folder." }
 
+# Clicking in a console window with QuickEdit on starts a text selection ("Select" in
+# the title), which freezes this script at its next output until Esc is pressed.
+# Turn QuickEdit off while installing. (Pasting still works with Ctrl+V.)
+try {
+    Add-Type -Namespace Install -Name Console -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int h);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
+'@
+    $hIn = [Install.Console]::GetStdHandle(-10); $mode = 0
+    if ([Install.Console]::GetConsoleMode($hIn, [ref]$mode)) {
+        [void][Install.Console]::SetConsoleMode($hIn, ($mode -band (-bnot 0x40)) -bor 0x80)
+    }
+} catch { }
+
 # ------------------------------------------------------------------ 1. Python
 Step 1 "Checking for Python 3.11 or newer"
 function Find-Python {
@@ -88,7 +103,7 @@ if ($current) {
     if ($ans -eq "y") { $current = "" }
 }
 while (-not $current) {
-    $url = (Read-Host "Paste the Slack incoming-webhook URL for #etf-scanner (starts with https://hooks.slack.com/)").Trim()
+    $url = (Read-Host "Paste (Ctrl+V) the Slack incoming-webhook URL for #etf-scanner (starts with https://hooks.slack.com/)").Trim()
     if ($url -match '^https://hooks\.slack\.com/') { $current = $url } else { Write-Host "That doesn't look like a Slack webhook URL; try again." }
 }
 Set-Content -Path $Webhook -Value $current -NoNewline -Encoding ascii
