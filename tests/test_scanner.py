@@ -581,3 +581,59 @@ def test_dashboard_helpers(tmp_path, monkeypatch):
     assert dashboard.tf_cell(None) == "no data"
     row = {"alerts": [{"direction": "bear", "level": "SIGNAL", "funds": ["SOXS (3x inverse leveraged)"]}]}
     assert dashboard.row_tag(row) == "bear_signal" and dashboard.look_at(row) == "Bear: SOXS (3x inverse leveraged)"
+
+
+# ---------------------------------------------------------------- chart window
+
+def test_chart_axis_and_view_math():
+    pytest.importorskip("tkinter")
+    import chart
+    assert chart.nice_ticks(0, 100, 5) == [0, 20, 40, 60, 80, 100]
+    assert chart.nice_ticks(131.2, 136.9, 4) == [132, 134, 136]
+    assert chart.nice_ticks(5, 5) == []
+    assert chart.visible_window(500, 100, 0) == (400, 500, 100, 0)          # latest bars
+    assert chart.visible_window(500, 100, 450) == (0, 100, 100, 400)        # can't pan past the start
+    assert chart.visible_window(30, 100, 5) == (0, 30, 30, 0)               # fewer bars than the view
+    count, offset = chart.zoom_window(500, 100, 0, 0.5, 1.0)                # zoom in at the right edge
+    assert (count, offset) == (50, 0)
+    count, offset = chart.zoom_window(500, 100, 0, 0.5, 0.0)                # zoom in at the left edge
+    assert count == 50 and chart.visible_window(500, count, offset)[0] == 400
+    assert list(chart.segments([(0, 1), (1, 2), (2, None), (3, 4), (4, 5), (5, 6)])) == [[0, 1, 1, 2], [3, 4, 4, 5, 5, 6]]
+    assert chart.fmt_volume(6_760_000) == "6.76M" and chart.fmt_price(163.836) == "163.84"
+
+
+def test_chart_window_draws_from_bars(cfg, monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    import chart
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    root.withdraw()
+    idx = pd.date_range("2026-10-01 09:30", periods=300, freq="h", tz=ET)
+    close = pd.Series(100 + np.cumsum(np.sin(np.arange(300) / 7)), index=idx)
+    bars = pd.DataFrame({"open": close.shift().fillna(100), "high": close + 1, "low": close - 1,
+                         "close": close, "volume": 1000.0}, index=idx)
+    data = {"ticker": "TEST", "tf": "1h", "df": scan.compute_indicators(bars, cfg["indicators"]),
+            "verdict": scan.analyze(bars, cfg), "cfg": cfg, "rsi_lengths": [7, 14], "loaded": 0}
+    monkeypatch.setattr(chart, "load_chart", lambda t, tf: data)
+    win = chart.ChartWindow(root, "TEST", "Test ETF", tf="1h")
+    win.geometry("1200x800")
+    for _ in range(50):                                   # wait for the loader thread
+        root.update()
+        if win.data:
+            break
+        root.after(50)
+    assert win.data is data and "Bullish" in win.verdict_lbl.cget("text")
+    win.redraw()
+    items = len(win.canvas.find_all())
+    assert items > 500                                    # candles, bands, 3 indicator panels, axes
+    win.hover = (600, 300)
+    win.draw_crosshair()
+    assert win.canvas.find_withtag("cross") and win.canvas.find_withtag("legend")
+    win._zoom(0.5, 600)
+    assert win.count == 60
+    before = win.offset                                   # zooming mid-chart keeps that bar in place
+    win._pan(20)
+    assert win.offset == before + 20
+    root.destroy()

@@ -65,6 +65,14 @@ Double-click **ETF Scanner** on the Desktop to open the dashboard:
   shows every ETF on 1h / 2h / 4h / daily (▲ / ▼ = bullish / bearish setup with
   conditions met, ↑ / ↓ = which way the current candle leans). Signal rows are
   green (bullish) or red (bearish), watches yellow.
+- **Charts**: double-click any ETF (in either table) to open its candlestick
+  chart: candles with Bollinger Bands (20, 2) and volume, plus RSI (7, 14),
+  StochRSI (3, 3, 14, 14) and MACD (8, 21, 5) panels with the 30/70 levels
+  marked. Pick **15m / 1h / 2h / 4h / 1D** at the top right (or keys 1-5);
+  mouse wheel zooms, dragging pans, **Home** jumps back to the latest candle, and
+  hovering shows the values under the cursor. The line under the price shows
+  the scanner's verdict on the current candle (which of the 4 conditions are
+  met). A chart opened from a signal starts on the timeframe that triggered it.
 - **Start scanner**: resumes a paused scanner, or starts the scheduled task if it
   isn't running. **Pause**: stops scanning and alerts until you press Start (it
   stays paused across reboots). **Scan now**: runs a full scan straight away, even

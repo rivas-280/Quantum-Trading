@@ -28,6 +28,8 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from zoneinfo import ZoneInfo
 
+import chart
+
 SKILL_DIR = Path(__file__).resolve().parent.parent
 REPO_DIR = SKILL_DIR.parent.parent.parent
 CONTROL_FILE = SKILL_DIR / "state" / "control.json"
@@ -187,6 +189,8 @@ class Dashboard(tk.Tk):
                 pass
         self.data: dict = {}
         self.shown_scan = None
+        self.rows_by_ticker: dict[str, dict] = {}
+        self.charts: dict[str, tk.Toplevel] = {}
         self.task = None
         self.task_checked = 0.0
         self.notice = ("", GREY)
@@ -236,13 +240,13 @@ class Dashboard(tk.Tk):
         body = ttk.PanedWindow(self, orient="vertical")
         body.pack(fill="both", expand=True, padx=14, pady=(4, 6))
 
-        sig_box = ttk.Labelframe(body, text=" Signals and watches from the last market scan ", padding=6)
+        sig_box = ttk.Labelframe(body, text=" Signals and watches from the last market scan  (double-click for the chart) ", padding=6)
         self.sig = self._tree(sig_box, ("ticker", "setup", "level", "new", "on", "look"),
                               ("Ticker", "Setup", "Level", "New?", "Triggered on", "Look at"),
                               (80, 90, 80, 60, 300, 420), height=5)
         body.add(sig_box, weight=1)
 
-        all_box = ttk.Labelframe(body, text=" All ETFs ", padding=6)
+        all_box = ttk.Labelframe(body, text=" All ETFs  (double-click one for its candle chart) ", padding=6)
         self.all_box = all_box
         self.all = None
         body.add(all_box, weight=3)
@@ -267,6 +271,8 @@ class Dashboard(tk.Tk):
         tree.configure(yscrollcommand=sb.set)
         tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        tree.bind("<Double-1>", lambda e, t=tree: self.open_chart_from(t, e))
+        tree.bind("<Return>", lambda e, t=tree: self.open_chart_from(t))
         tree.tag_configure("bull_signal", background="#dafbe1")
         tree.tag_configure("bear_signal", background="#ffebe9")
         tree.tag_configure("watch", background="#fff8c5")
@@ -331,6 +337,28 @@ class Dashboard(tk.Tk):
         self.say("Scan requested. It starts within 5 seconds and takes a minute or two; "
                  "new signals are posted to Slack as usual.")
         self.after(500, self.refresh_once)
+
+    def open_chart_from(self, tree, event=None):
+        item = tree.identify_row(event.y) if event is not None else tree.focus()
+        if not item:
+            return
+        ticker = (tree.item(item, "values") or [""])[0]
+        if ticker:
+            self.open_chart(ticker)
+
+    def open_chart(self, ticker: str):
+        win = self.charts.get(ticker)
+        if win is not None and win.winfo_exists():
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            return
+        row = self.rows_by_ticker.get(ticker, {})
+        tf = "1h"
+        for a in row.get("alerts", []):          # open on the timeframe that triggered
+            tf = next(iter(a.get("triggers") or {}), tf)
+            break
+        self.charts[ticker] = chart.ChartWindow(self, ticker, row.get("name", ""), tf=tf)
 
     def open_log(self):
         if not LOG_FILE.exists():
@@ -435,6 +463,7 @@ class Dashboard(tk.Tk):
         self.sig.delete(*self.sig.get_children())
         self.all.delete(*self.all.get_children())
         rows = s.get("rows") or []
+        self.rows_by_ticker = {r["ticker"]: r for r in rows}
         order = {"bull_signal": 0, "bear_signal": 0, "watch": 1, "plain": 2}
         for row in sorted(rows, key=lambda r: (order[row_tag(r)], r["ticker"])):
             tag = row_tag(row)
