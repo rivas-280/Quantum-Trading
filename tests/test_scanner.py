@@ -480,3 +480,160 @@ def test_lifecycle_and_announce(cfg, monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("SLACK_WEBHOOK_URL")
     monkeypatch.setattr(scan, "WEBHOOK_FILE", tmp_path / "none.txt")
     assert scan.main(["--test-slack"]) == 2
+
+
+# ---------------------------------------------------------------- dashboard link (--loop <-> dashboard.py)
+
+def summary_scan(cfg):
+    s = scan_with({"1h": ("SIGNAL", 4), "2h": (None, 0), "4h": ("WATCH", 3), "1d": (None, 0)})
+    s.update(scanned_at="2026-11-05T10:00:20-05:00", tickers_scanned=1,
+             errors=[{"ticker": "XLE", "error": "HTTPError: 429"}])
+    scan.apply_state(s, cfg, False, dt.datetime(2026, 11, 5, 10, 0, tzinfo=ET))
+    return s
+
+
+def test_scan_summary_for_dashboard(cfg):
+    s = scan.scan_summary(summary_scan(cfg), forced=True)
+    assert s["forced"] and s["tickers_scanned"] == 1 and s["signal_count"] == 1 and s["error_count"] == 1
+    row = s["rows"][0]
+    assert row["ticker"] == "SOXX" and row["trade_bull"] == ["SOXL (3x leveraged)"]
+    assert row["timeframes"]["1h"]["bull"] == "SIGNAL" and row["timeframes"]["4h"]["bull_met"] == 3
+    assert row["timeframes"]["2h"]["lean"] == "neutral"
+    a = row["alerts"][0]
+    assert a["direction"] == "bull" and a["level"] == "SIGNAL" and a["funds"] == ["SOXL (3x leveraged)"]
+    json.dumps(s)                                                    # serialisable as-is
+
+
+def test_control_and_atomic_write(tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, "CONTROL_FILE", tmp_path / "state" / "control.json")
+    assert scan.read_control() == {"paused": False, "scan_now": None}   # no file = running
+    scan.write_json_atomic(scan.CONTROL_FILE, {"paused": True, "scan_now": "t1"})
+    assert scan.read_control() == {"paused": True, "scan_now": "t1"}
+    assert [p.name for p in scan.CONTROL_FILE.parent.iterdir()] == ["control.json"]   # no temp left
+
+
+def test_pause_resume_messages(cfg):
+    assert "paused" in scan.lifecycle_message(cfg, "pause", 15)
+    assert "resumed" in scan.lifecycle_message(cfg, "resume", 15) and "every 15 min" in scan.lifecycle_message(cfg, "resume", 15)
+    assert "started, but paused" in scan.lifecycle_message(cfg, "start", 15, paused=True)
+
+
+def loop_harness(cfg, tmp_path, monkeypatch, steps, paused_at_start=False):
+    """Run run_loop with fake scans; each time.sleep runs the next step, then Ctrl-C."""
+    for name in ("CONTROL_FILE", "DASHBOARD_FILE", "STATUS_FILE", "STATE_FILE"):
+        monkeypatch.setattr(scan, name, tmp_path / f"{name.lower()}.json")
+    if paused_at_start:
+        scan.write_json_atomic(scan.CONTROL_FILE, {"paused": True})
+    calls, posted = [], []
+    def fake_scan_once(c, a):
+        calls.append(a.force)
+        return summary_scan(cfg)
+    monkeypatch.setattr(scan, "scan_once", fake_scan_once)
+    monkeypatch.setattr(scan, "emit", lambda s, c, a: None)
+    monkeypatch.setattr(scan, "webhook_url", lambda: "https://hooks.slack.com/x")
+    monkeypatch.setattr(scan, "post_to_slack", lambda msgs, url: posted.extend(msgs) or [])
+    monkeypatch.setattr(scan, "seconds_until_next_run", lambda *a: 900)
+    pending = list(steps)
+    def fake_sleep(_):
+        if not pending:
+            raise KeyboardInterrupt
+        pending.pop(0)()
+    monkeypatch.setattr(scan.time, "sleep", fake_sleep)
+    args = type("A", (), {"interval": None, "post_slack": True, "force": False})()
+    assert scan.run_loop(cfg, args) == 0
+    return calls, posted, json.loads(scan.DASHBOARD_FILE.read_text())
+
+
+def test_loop_pause_scan_now_resume(cfg, tmp_path, monkeypatch):
+    ctl = lambda **kw: (lambda: scan.write_json_atomic(scan.CONTROL_FILE, {**scan.read_control(), **kw}))
+    calls, posted, d = loop_harness(cfg, tmp_path, monkeypatch, [
+        ctl(paused=True), ctl(scan_now="t1"), ctl(paused=False)])
+    assert calls == [False, True, False]        # scheduled scan, Scan now (forced), scan on resume
+    kinds = [m.split("**")[1] for m in posted]
+    assert kinds == ["ETF scanner started", "ETF scanner paused", "ETF scanner resumed", "ETF scanner stopped"]
+    assert d["state"] == "stopped" and d["paused"] is False and d["scan_now_handled"] == "t1"
+    assert d["last_result"] == "scanned" and d["last_scan"]["signal_count"] == 1
+    assert d["heartbeat"] and d["next_check"] and d["slack_webhook"] is True
+
+
+def test_loop_starts_paused_and_skips_scans(cfg, tmp_path, monkeypatch):
+    calls, posted, d = loop_harness(cfg, tmp_path, monkeypatch, [], paused_at_start=True)
+    assert calls == [] and "started, but paused" in posted[0]
+    assert d["paused"] is True and d["last_result"] == "paused"
+
+
+def test_dashboard_helpers(tmp_path, monkeypatch):
+    pytest.importorskip("tkinter")
+    import dashboard
+    monkeypatch.setattr(dashboard, "CONTROL_FILE", tmp_path / "control.json")
+    dashboard.write_control(paused=True)
+    dashboard.write_control(scan_now="t1")
+    assert dashboard.read_json(dashboard.CONTROL_FILE) == {"paused": True, "scan_now": "t1"}
+    now = dashboard.now_et()
+    assert dashboard.scanner_alive({"heartbeat": now.isoformat(), "state": "idle"})
+    assert not dashboard.scanner_alive({"heartbeat": (now - dt.timedelta(minutes=5)).isoformat(), "state": "idle"})
+    assert dashboard.scanner_alive({"heartbeat": (now - dt.timedelta(minutes=5)).isoformat(), "state": "scanning"})
+    assert not dashboard.scanner_alive({"heartbeat": now.isoformat(), "state": "stopped"})
+    assert not dashboard.scanner_alive({})
+    t = {"bull": "SIGNAL", "bull_met": 4, "bear": None, "bear_met": 0, "enabled": 4, "lean": "upside"}
+    assert dashboard.tf_cell(t) == "▲ SIGNAL 4/4"
+    assert dashboard.tf_cell({**t, "bull": None, "bull_met": 2}) == "↑ 2/4"
+    assert dashboard.tf_cell(None) == "no data"
+    row = {"alerts": [{"direction": "bear", "level": "SIGNAL", "funds": ["SOXS (3x inverse leveraged)"]}]}
+    assert dashboard.row_tag(row) == "bear_signal" and dashboard.look_at(row) == "Bear: SOXS (3x inverse leveraged)"
+
+
+# ---------------------------------------------------------------- chart window
+
+def test_chart_axis_and_view_math():
+    pytest.importorskip("tkinter")
+    import chart
+    assert chart.nice_ticks(0, 100, 5) == [0, 20, 40, 60, 80, 100]
+    assert chart.nice_ticks(131.2, 136.9, 4) == [132, 134, 136]
+    assert chart.nice_ticks(5, 5) == []
+    assert chart.visible_window(500, 100, 0) == (400, 500, 100, 0)          # latest bars
+    assert chart.visible_window(500, 100, 450) == (0, 100, 100, 400)        # can't pan past the start
+    assert chart.visible_window(30, 100, 5) == (0, 30, 30, 0)               # fewer bars than the view
+    count, offset = chart.zoom_window(500, 100, 0, 0.5, 1.0)                # zoom in at the right edge
+    assert (count, offset) == (50, 0)
+    count, offset = chart.zoom_window(500, 100, 0, 0.5, 0.0)                # zoom in at the left edge
+    assert count == 50 and chart.visible_window(500, count, offset)[0] == 400
+    assert list(chart.segments([(0, 1), (1, 2), (2, None), (3, 4), (4, 5), (5, 6)])) == [[0, 1, 1, 2], [3, 4, 4, 5, 5, 6]]
+    assert chart.fmt_volume(6_760_000) == "6.76M" and chart.fmt_price(163.836) == "163.84"
+
+
+def test_chart_window_draws_from_bars(cfg, monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    import chart
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    root.withdraw()
+    idx = pd.date_range("2026-10-01 09:30", periods=300, freq="h", tz=ET)
+    close = pd.Series(100 + np.cumsum(np.sin(np.arange(300) / 7)), index=idx)
+    bars = pd.DataFrame({"open": close.shift().fillna(100), "high": close + 1, "low": close - 1,
+                         "close": close, "volume": 1000.0}, index=idx)
+    data = {"ticker": "TEST", "tf": "1h", "df": scan.compute_indicators(bars, cfg["indicators"]),
+            "verdict": scan.analyze(bars, cfg), "cfg": cfg, "rsi_lengths": [7, 14], "loaded": 0}
+    monkeypatch.setattr(chart, "load_chart", lambda t, tf: data)
+    win = chart.ChartWindow(root, "TEST", "Test ETF", tf="1h")
+    win.geometry("1200x800")
+    for _ in range(50):                                   # wait for the loader thread
+        root.update()
+        if win.data:
+            break
+        root.after(50)
+    assert win.data is data and "Bullish" in win.verdict_lbl.cget("text")
+    win.redraw()
+    items = len(win.canvas.find_all())
+    assert items > 500                                    # candles, bands, 3 indicator panels, axes
+    win.hover = (600, 300)
+    win.draw_crosshair()
+    assert win.canvas.find_withtag("cross") and win.canvas.find_withtag("legend")
+    win._zoom(0.5, 600)
+    assert win.count == 60
+    before = win.offset                                   # zooming mid-chart keeps that bar in place
+    win._pan(20)
+    assert win.offset == before + 20
+    root.destroy()

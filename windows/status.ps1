@@ -18,6 +18,12 @@ if (Test-Path $Status) {
     $s = Get-Content $Status -Raw | ConvertFrom-Json
     Write-Host "Last scan:    $($s.last_scan)   in session: $($s.running)   data outage: $($s.outage)"
 }
+$Dash = Join-Path $Skill "state\dashboard.json"
+if (Test-Path $Dash) {
+    $d = Get-Content $Dash -Raw | ConvertFrom-Json
+    Write-Host "Heartbeat:    $($d.heartbeat)   paused: $($d.paused)   last check: $($d.last_check) ($($d.last_result))"
+    if ($d.paused) { Write-Host "Paused from the dashboard: press Start in the 'ETF Scanner' window to resume." -ForegroundColor Yellow }
+}
 if ($task.State -ne "Running" -and (Test-Path $Log)) {
     # If something still holds the log open while the task isn't running, an
     # orphaned scanner from an earlier install is running outside the task and

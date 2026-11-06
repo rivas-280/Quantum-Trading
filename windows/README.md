@@ -50,13 +50,44 @@ Keep the folder where it is afterwards: the scheduled task points at it.
    - Paste the webhook URL from step 1. A test message appears in `#etf-scanner`.
    - Choose whether to stop the PC sleeping while plugged in (recommended: yes).
 
-When it finishes you'll see **ETF scanner started** in `#etf-scanner`.
+When it finishes you'll see **ETF scanner started** in `#etf-scanner`, and an
+**ETF Scanner** icon on the Desktop and in the Start menu.
+
+## The dashboard
+
+Double-click **ETF Scanner** on the Desktop to open the dashboard:
+
+- **Status**: Running / Scanning now / Paused / Not running, with the scan hours.
+- **Last check**: when the scanner last checked and what happened (scanned,
+  outside scan hours, paused, failed), plus when the next check is due.
+- **Last market scan**: the results of the most recent real scan. A *Signals and
+  watches* table shows which leveraged ETF to look at, and an *All ETFs* table
+  shows every ETF on 1h / 2h / 4h / daily (▲ / ▼ = bullish / bearish setup with
+  conditions met, ↑ / ↓ = which way the current candle leans). Signal rows are
+  green (bullish) or red (bearish), watches yellow.
+- **Charts**: double-click any ETF (in either table) to open its candlestick
+  chart: candles with Bollinger Bands (20, 2) and volume, plus RSI (7, 14),
+  StochRSI (3, 3, 14, 14) and MACD (8, 21, 5) panels with the 30/70 levels
+  marked. Pick **15m / 1h / 2h / 4h / 1D** at the top right (or keys 1-5);
+  mouse wheel zooms, dragging pans, **Home** jumps back to the latest candle, and
+  hovering shows the values under the cursor. The line under the price shows
+  the scanner's verdict on the current candle (which of the 4 conditions are
+  met). A chart opened from a signal starts on the timeframe that triggered it.
+- **Start scanner**: resumes a paused scanner, or starts the scheduled task if it
+  isn't running. **Pause**: stops scanning and alerts until you press Start (it
+  stays paused across reboots). **Scan now**: runs a full scan straight away, even
+  outside scan hours. **Open log**: opens `scanner.log`.
+
+Slack keeps working exactly as before: the background scanner does all the
+posting, whether or not the dashboard is open, and it also posts when it's paused
+or resumed. Closing the dashboard doesn't stop the scanner.
 
 ## Day to day
 
 | To... | Run (in the Quantum-Trading folder) |
 |---|---|
-| Check it's running | `powershell -ExecutionPolicy Bypass -File .\windows\status.ps1` |
+| See the status, last scan, start / pause | Double-click **ETF Scanner** on the Desktop |
+| Check it's running (text) | `powershell -ExecutionPolicy Bypass -File .\windows\status.ps1` |
 | Read the log | `Get-Content .claude\skills\etf-signal-scanner\logs\scanner.log -Tail 40` |
 | Change settings | Edit `.claude\skills\etf-signal-scanner\config.yaml`, then restart: `Stop-ScheduledTask "ETF Signal Scanner"; Start-ScheduledTask "ETF Signal Scanner"` (as admin) |
 | Update the code | `git pull` (or download the ZIP again), run `install.ps1` again |
@@ -69,6 +100,7 @@ When it finishes you'll see **ETF scanner started** in `#etf-scanner`.
 - **New SIGNAL** alerts, with the 1h / 2h / 4h / daily table.
 - **Stopped for the day**: after 20:00 ET, with the time scans resume.
 - **Isn't getting market data / data is back**: if half or more of the ETFs fail to download.
+- **ETF scanner paused / resumed**: when you press Pause or Start in the dashboard.
 - **ETF scanner stopped**: when it's closed normally or uninstalled.
 
 It can't post if the PC loses power or internet, or is switched off. If

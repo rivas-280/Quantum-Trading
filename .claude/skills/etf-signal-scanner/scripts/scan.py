@@ -47,6 +47,8 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = SKILL_DIR / "config.yaml"
 STATE_FILE = SKILL_DIR / "state" / "last_scan.json"
 STATUS_FILE = SKILL_DIR / "state" / "status.json"
+CONTROL_FILE = SKILL_DIR / "state" / "control.json"      # written by the dashboard: pause / scan now
+DASHBOARD_FILE = SKILL_DIR / "state" / "dashboard.json"  # written by --loop: heartbeat + last check
 WEBHOOK_FILE = SKILL_DIR / "slack_webhook_url.txt"   # git-ignored; or set SLACK_WEBHOOK_URL
 ET = ZoneInfo("America/New_York")
 SESSION_OPEN = dt.time(9, 30)        # regular trading hours
@@ -999,16 +1001,25 @@ def deliver(scan: dict, args) -> None:
         print(f"Slack post failed: {e}", file=sys.stderr, flush=True)
 
 
-def lifecycle_message(cfg: dict, event: str, interval: int) -> str | None:
+def lifecycle_message(cfg: dict, event: str, interval: int, paused: bool = False) -> str | None:
     slack = cfg.get("slack") or {}
     if not (slack.get("enabled") and slack.get("status_messages", True)):
         return None
     now = dt.datetime.now(tz=ET)
     host = socket.gethostname()
     hours = "04:00-20:00 ET" if cfg["data"].get("include_prepost") else "09:30-16:00 ET"
+    if event == "start" and paused:
+        return (f":double_vertical_bar: **ETF scanner started, but paused** on {host} · {now:%a %b %d %H:%M} ET · "
+                "it was paused from the dashboard; press Start there to resume scanning.")
     if event == "start":
         return (f":arrow_forward: **ETF scanner started** on {host} · {now:%a %b %d %H:%M} ET · "
                 f"scanning every {interval} min during {hours}.")
+    if event == "pause":
+        return (f":double_vertical_bar: **ETF scanner paused** on {host} · {now:%a %b %d %H:%M} ET, "
+                "from the dashboard. No scans or alerts until it's started again.")
+    if event == "resume":
+        return (f":arrow_forward: **ETF scanner resumed** on {host} · {now:%a %b %d %H:%M} ET, "
+                f"from the dashboard · scanning every {interval} min during {hours}.")
     return (f":octagonal_sign: **ETF scanner stopped** on {host} · {now:%a %b %d %H:%M} ET "
             "(the program was closed). No scans or alerts until it starts again.")
 
@@ -1029,6 +1040,168 @@ def emit(scan: dict, cfg: dict, args) -> None:
         print(json.dumps(scan, indent=2, default=str), flush=True)
     else:
         print(format_text(scan, cfg, args.all), flush=True)
+
+
+# ---------------------------------------------------------------- dashboard link
+# The --loop scanner and the desktop dashboard (dashboard.py) talk through two
+# small JSON files in state/: the dashboard writes control.json (pause, scan
+# now) and the scanner writes dashboard.json (heartbeat, last check, results).
+
+POLL_SECONDS = 5          # how often --loop checks control.json between scans
+HEARTBEAT_SECONDS = 30    # how often --loop refreshes dashboard.json while idle
+
+
+def write_json_atomic(path: Path, data: dict) -> None:
+    """Write via a temp file + rename so a reader never sees half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=2, default=str))
+    for _ in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:     # Windows: the reader has it open this instant
+            time.sleep(0.05)
+    tmp.unlink(missing_ok=True)
+
+
+def read_control() -> dict:
+    c = _read_json(CONTROL_FILE)
+    return {"paused": bool(c.get("paused", False)), "scan_now": c.get("scan_now")}
+
+
+def scan_summary(scan: dict, forced: bool = False) -> dict:
+    """The parts of a scan the dashboard shows: per-ticker, per-timeframe
+    level/lean, the alerts and the errors."""
+    alerts: dict[str, list] = {}
+    for a in scan.get("alerts", []):
+        alerts.setdefault(a["ticker"], []).append({
+            "direction": a["direction"], "level": a["level"], "new": a["new"],
+            "triggers": a["triggers"], "funds": [describe_etf(e) for e in a["trade"]]})
+    rows = []
+    for r in scan["results"]:
+        tfs = {}
+        for tf, res in r["timeframes"].items():
+            tfs[tf] = {"bull": res["bull"]["level"], "bull_met": res["bull"]["met"],
+                       "bear": res["bear"]["level"], "bear_met": res["bear"]["met"],
+                       "enabled": res["bull"]["enabled"], "lean": lean(res)["side"],
+                       "live": bool(res.get("live"))}
+        rows.append({"ticker": r["ticker"], "name": r.get("name", r["ticker"]), "price": r.get("price"),
+                     "trade_bull": [describe_etf(e) for e in r.get("trade_bull", [])],
+                     "trade_bear": [describe_etf(e) for e in r.get("trade_bear", [])],
+                     "timeframes": tfs, "alerts": alerts.get(r["ticker"], [])})
+    return {"scanned_at": scan["scanned_at"], "forced": forced, "timeframes": scan["timeframes"],
+            "session": scan.get("session"), "tickers_scanned": scan["tickers_scanned"],
+            "alert_count": len(scan.get("alerts", [])),
+            "signal_count": sum(1 for a in scan.get("alerts", []) if a["level"] == "SIGNAL"),
+            "posted": scan.get("posted", 0),
+            "errors": scan["errors"][:50], "error_count": len(scan["errors"]), "rows": rows}
+
+
+class LoopStatus:
+    """dashboard.json, kept up to date by the --loop scanner."""
+
+    def __init__(self, cfg: dict, interval: int, paused: bool):
+        previous = _read_json(DASHBOARD_FILE)
+        now = dt.datetime.now(tz=ET).isoformat(timespec="seconds")
+        self.data = {
+            "pid": os.getpid(), "host": socket.gethostname(), "started_at": now,
+            "interval_minutes": interval,
+            "hours": "04:00-20:00 ET" if cfg["data"].get("include_prepost") else "09:30-16:00 ET",
+            "slack_webhook": bool(webhook_url()), "paused": paused, "state": "idle",
+            "last_check": None, "last_result": None, "message": None, "next_check": None,
+            "last_scan": previous.get("last_scan"),       # keep showing results across restarts
+            "scan_now_handled": None, "stopped_at": None,
+        }
+        self.saved = 0.0
+
+    def save(self, **changes) -> None:
+        self.data.update(changes)
+        self.data["heartbeat"] = dt.datetime.now(tz=ET).isoformat(timespec="seconds")
+        try:
+            write_json_atomic(DASHBOARD_FILE, self.data)
+        except OSError as exc:
+            print(f"Couldn't update {DASHBOARD_FILE.name}: {exc}", file=sys.stderr, flush=True)
+        self.saved = time.monotonic()
+
+
+def run_loop(cfg: dict, args) -> int:
+    interval = int(args.interval or cfg.get("interval_minutes", 15))
+    align = bool(cfg.get("align_to_bar_close", True))
+    delay = int(cfg.get("post_close_delay_seconds", 20))
+    print(f"Looping every {interval} min (Ctrl-C to stop)", file=sys.stderr, flush=True)
+    url = webhook_url() if args.post_slack else None
+
+    def slack(event: str, paused: bool = False) -> None:
+        msg = lifecycle_message(cfg, event, interval, paused)
+        if url and msg:
+            for err in post_to_slack([msg], url):
+                print(f"Slack post failed: {err}", file=sys.stderr, flush=True)
+
+    def stamp() -> str:
+        return dt.datetime.now(tz=ET).isoformat(timespec="seconds")
+
+    control = read_control()
+    paused = control["paused"]
+    handled = control["scan_now"]          # ignore requests made before this start
+    status = LoopStatus(cfg, interval, paused)
+    status.save(scan_now_handled=handled)
+    slack("start", paused)
+    if paused:
+        print(f"{dt.datetime.now(tz=ET):%Y-%m-%d %H:%M} Paused from the dashboard; not scanning.",
+              file=sys.stderr, flush=True)
+
+    def check(force: bool = False) -> None:
+        run_args = argparse.Namespace(**{**vars(args), "force": True}) if force else args
+        status.save(state="scanning", scan_started=stamp())
+        try:
+            scan = scan_once(cfg, run_args)
+            emit(scan, cfg, args)
+            if scan.get("status") == "market_closed":
+                status.save(state="idle", last_check=stamp(), last_result="market_closed",
+                            message="Outside scan hours; skipped.")
+            else:
+                s = scan_summary(scan, forced=force)
+                status.save(state="idle", last_check=stamp(), last_result="scanned", last_scan=s,
+                            message=f"{s['tickers_scanned']} ETFs scanned, {s['signal_count']} signal(s), "
+                                    f"{s['error_count']} error(s)" + (" (Scan now)" if force else ""))
+        except Exception as exc:
+            print(f"{dt.datetime.now(tz=ET):%Y-%m-%d %H:%M} scan failed: {exc}", file=sys.stderr, flush=True)
+            status.save(state="idle", last_check=stamp(), last_result="failed", message=str(exc)[:300])
+
+    next_run = time.time()                  # first check straight away
+    try:
+        while True:
+            control = read_control()
+            if control["paused"] != paused:
+                paused = control["paused"]
+                print(f"{dt.datetime.now(tz=ET):%Y-%m-%d %H:%M} "
+                      f"{'Paused' if paused else 'Resumed'} from the dashboard.", file=sys.stderr, flush=True)
+                slack("pause" if paused else "resume")
+                status.save(paused=paused)
+                if not paused:
+                    next_run = time.time()   # resume -> check right away
+            if control["scan_now"] and control["scan_now"] != handled:
+                handled = control["scan_now"]
+                print(f"{dt.datetime.now(tz=ET):%Y-%m-%d %H:%M} Scan requested from the dashboard.",
+                      file=sys.stderr, flush=True)
+                check(force=True)
+                status.save(scan_now_handled=handled)
+            if time.time() >= next_run:
+                if paused:
+                    status.save(last_check=stamp(), last_result="paused",
+                                message="Paused from the dashboard; skipped.")
+                else:
+                    check()
+                next_run = time.time() + seconds_until_next_run(dt.datetime.now(tz=ET), interval, align, delay)
+                status.save(next_check=dt.datetime.fromtimestamp(next_run, tz=ET).isoformat(timespec="seconds"))
+            elif time.monotonic() - status.saved >= HEARTBEAT_SECONDS:
+                status.save()
+            time.sleep(max(0.2, min(POLL_SECONDS, next_run - time.time())))
+    except KeyboardInterrupt:
+        status.save(state="stopped", stopped_at=stamp())
+        slack("stop")
+        return 0
 
 
 def main(argv=None) -> int:
@@ -1085,26 +1258,7 @@ def main(argv=None) -> int:
         emit(scan_once(cfg, args), cfg, args)
         return 0
 
-    interval = int(args.interval or cfg.get("interval_minutes", 15))
-    align = bool(cfg.get("align_to_bar_close", True))
-    delay = int(cfg.get("post_close_delay_seconds", 20))
-    print(f"Looping every {interval} min (Ctrl-C to stop)", file=sys.stderr, flush=True)
-    url = webhook_url() if args.post_slack else None
-    start_msg = lifecycle_message(cfg, "start", interval)
-    if url and start_msg:
-        post_to_slack([start_msg], url)
-    try:
-        while True:
-            try:
-                emit(scan_once(cfg, args), cfg, args)
-            except Exception as exc:
-                print(f"{dt.datetime.now(tz=ET):%Y-%m-%d %H:%M} scan failed: {exc}", file=sys.stderr, flush=True)
-            time.sleep(seconds_until_next_run(dt.datetime.now(tz=ET), interval, align, delay))
-    except KeyboardInterrupt:
-        stop_msg = lifecycle_message(cfg, "stop", interval)
-        if url and stop_msg:
-            post_to_slack([stop_msg], url)
-        return 0
+    return run_loop(cfg, args)
 
 
 if __name__ == "__main__":
