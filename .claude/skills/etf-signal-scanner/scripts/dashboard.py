@@ -168,9 +168,8 @@ def row_tag(row: dict) -> str:
 def look_at(row: dict) -> str:
     out = []
     for a in row.get("alerts", []):
-        funds = a.get("funds") or []
-        if funds:
-            out.append(("Bull: " if a["direction"] == "bull" else "Bear: ") + ", ".join(funds))
+        funds = ", ".join(a.get("funds") or []) or "none mapped"
+        out.append(("Bull: " if a["direction"] == "bull" else "Bear: ") + funds)
     return "  |  ".join(out)
 
 
@@ -215,13 +214,13 @@ class Dashboard(tk.Tk):
         top.columnconfigure(1, weight=1)
 
         buttons = ttk.Frame(top)
-        buttons.grid(row=0, column=2, rowspan=2, sticky="e")
+        buttons.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
         self.btn_start = ttk.Button(buttons, text="▶  Start scanner", style="Big.TButton", command=self.start)
         self.btn_pause = ttk.Button(buttons, text="❚❚  Pause", style="Big.TButton", command=self.pause)
         self.btn_scan = ttk.Button(buttons, text="⟳  Scan now", style="Big.TButton", command=self.scan_now)
         self.btn_log = ttk.Button(buttons, text="Open log", command=self.open_log)
         for i, b in enumerate((self.btn_start, self.btn_pause, self.btn_scan, self.btn_log)):
-            b.grid(row=0, column=i, padx=4)
+            b.grid(row=0, column=i, padx=(0, 8))
 
         info = ttk.Frame(self, padding=(14, 6, 14, 6))
         info.pack(fill="x")
@@ -240,7 +239,7 @@ class Dashboard(tk.Tk):
         sig_box = ttk.Labelframe(body, text=" Signals and watches from the last market scan ", padding=6)
         self.sig = self._tree(sig_box, ("ticker", "setup", "level", "new", "on", "look"),
                               ("Ticker", "Setup", "Level", "New?", "Triggered on", "Look at"),
-                              (80, 90, 80, 60, 200, 520), height=5)
+                              (80, 90, 80, 60, 300, 420), height=5)
         body.add(sig_box, weight=1)
 
         all_box = ttk.Labelframe(body, text=" All ETFs ", padding=6)
@@ -252,8 +251,8 @@ class Dashboard(tk.Tk):
         bottom.pack(fill="x")
         ttk.Label(bottom, foreground=GREY, text=(
             "▲ / ▼ = bullish / bearish setup with conditions met (RSI, StochRSI, MACD, Bollinger).   "
-            "↑ / ↓ = which way the current candle leans.   Closing this window doesn't stop the scanner; "
-            "it keeps scanning and posting to Slack.")).pack(anchor="w")
+            "↑ / ↓ = which way the current candle leans.\n"
+            "Closing this window doesn't stop the scanner: it keeps scanning and posting to Slack.")).pack(anchor="w")
         self.err_lbl = ttk.Label(bottom, text="", foreground=RED, wraplength=1100, justify="left")
         self.err_lbl.pack(anchor="w")
 
