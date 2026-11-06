@@ -637,3 +637,99 @@ def test_chart_window_draws_from_bars(cfg, monkeypatch):
     win._pan(20)
     assert win.offset == before + 20
     root.destroy()
+
+
+# ---------------------------------------------------------------- Webull data source
+
+def test_webull_response_layouts_and_times():
+    import webull_source as wb
+    bar = lambda t, c: {"time": t, "open": str(c), "high": str(c + 1), "low": str(c - 1), "close": str(c), "volume": "1000"}
+    layouts = [
+        [{"symbol": "SPY", "result": [bar("2026-11-05T15:00:00.000+0000", 10), bar("2026-11-05T14:00:00.000+0000", 9)]},
+         {"symbol": "QQQ", "result": [bar(1793890800000, 20)]}],                       # epoch ms
+        {"data": [{"symbol": "SPY", "bars": [bar("2026-11-05T14:00:00Z", 9), bar("2026-11-05T15:00:00Z", 10)]},
+                  {"symbol": "QQQ", "bars": [bar("1793890800", 20)]}]},                 # epoch s as string
+        {"SPY": [bar("2026-11-05T14:00:00Z", 9), bar("2026-11-05T15:00:00Z", 10)], "QQQ": [bar(1793890800000, 20)]},
+    ]
+    for body in layouts:
+        got = wb.parse_bars_response(body, ["SPY", "QQQ"], daily=False)
+        assert set(got) == {"SPY", "QQQ"}
+        spy = got["SPY"]
+        assert list(spy["close"]) == [9.0, 10.0]                            # sorted, numeric
+        assert spy.index[0] == pd.Timestamp("2026-11-05 09:00", tz=ET)       # 14:00 UTC = 09:00 ET
+        assert got["QQQ"].index[0] == pd.Timestamp("2026-11-05 10:00", tz=ET)
+    single = wb.parse_bars_response([bar("2026-11-05T14:00:00Z", 9)], ["SPY"], daily=False)   # bare list
+    assert list(single) == ["SPY"]
+    daily = wb.parse_bars_response([bar("2026-11-05T00:00:00Z", 9), bar("2026-11-06T05:00:00Z", 10)], ["SPY"], daily=True)
+    assert [d.date() for d in daily["SPY"].index] == [dt.date(2026, 11, 5), dt.date(2026, 11, 6)]   # calendar dates kept
+
+
+def test_webull_errors_are_short_and_secret_free():
+    import webull_source as wb
+    class E(Exception):
+        error_code, error_msg = "MARKET_DATA_NOT_SUBSCRIBED", "Insufficient permission, please subscribe to STOCK QUOTES."
+    assert "subscription" in wb.describe_error(E()) and "STOCK QUOTES" in wb.describe_error(E())
+    leaky = Exception("boom x-access-token: 0123456789abcdef0123456789abcdef Request:{headers...}")
+    text = wb.describe_error(leaky)
+    assert "0123456789abcdef" not in text and "headers" not in text
+    assert "Connect Webull" in wb.describe_error(Exception("init_token status not verified error. status:PENDING"))
+
+
+def test_webull_credentials(tmp_path, monkeypatch):
+    import webull_source as wb
+    monkeypatch.setattr(wb, "CREDENTIALS_FILE", tmp_path / "creds.yaml")
+    assert not wb.configured()
+    (tmp_path / "creds.yaml").write_text('app_key: ""\napp_secret: ""\nregion: us\n')
+    with pytest.raises(wb.WebullError, match="missing"):
+        wb.load_credentials()
+    (tmp_path / "creds.yaml").write_text('app_key: "k"\napp_secret: "s"\n')
+    assert wb.load_credentials() == {"app_key": "k", "app_secret": "s", "region": "us", "endpoint": "api.webull.com"}
+
+
+def webull_cfg(cfg):
+    cfg["data"].update(source="webull", fallback_source="csv", timeframes=["1h", "1d"])
+    return cfg
+
+
+def test_scan_uses_webull_candles(cfg, monkeypatch):
+    import webull_source as wb
+    idx = pd.date_range("2026-10-01 09:30", periods=300, freq="h", tz=ET)
+    close = pd.Series(100 + np.sin(np.arange(300) / 5), index=idx)
+    bars = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1, "close": close, "volume": 1.0}, index=idx)
+    asked = []
+    def fake_fetch(symbols, tf, count=600, prepost=False, token_wait=20):
+        asked.append((tuple(symbols), tf, count, prepost))
+        return {s: bars for s in symbols}
+    monkeypatch.setattr(wb, "fetch_bars", fake_fetch)
+    out = scan.run_scan(webull_cfg(cfg), {"SPY", "QQQ"}, dt.datetime(2026, 11, 5, 12, tzinfo=ET))
+    assert out["source"] == "webull" and out["source_error"] is None and out["tickers_scanned"] == 2
+    assert sorted(a[1] for a in asked) == ["1d", "1h"] and all(len(a[0]) == 2 for a in asked)   # one batch per timeframe
+    assert all(a[3] is True for a in asked)                                                   # extended hours requested
+
+
+def test_scan_falls_back_when_webull_fails(cfg, monkeypatch, tmp_path, capsys):
+    import webull_source as wb
+    def boom(*a, **k):
+        raise wb.WebullError("MARKET_DATA_NOT_SUBSCRIBED: please subscribe")
+    monkeypatch.setattr(wb, "fetch_bars", boom)
+    seen = []
+    monkeypatch.setattr(scan, "load_bars", lambda t, tfs, dc, s, pre=None: seen.append(dc["source"]) or (_ for _ in ()).throw(RuntimeError("csv missing")))
+    out = scan.run_scan(webull_cfg(cfg), {"SPY"}, dt.datetime(2026, 11, 5, 12, tzinfo=ET))
+    assert out["source"] == "csv" and out["requested_source"] == "webull" and "SUBSCRIBED" in out["source_error"]
+    assert seen == ["csv"] and "Webull data unavailable" in capsys.readouterr().err
+    cfg["data"].pop("fallback_source")
+    with pytest.raises(RuntimeError, match="Webull data unavailable"):
+        scan.run_scan(cfg, {"SPY"}, dt.datetime(2026, 11, 5, 12, tzinfo=ET))
+
+
+def test_webull_outage_and_recovery_posted_once(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, "STATUS_FILE", tmp_path / "status.json")
+    t = dt.datetime(2026, 11, 6, 10, 0, tzinfo=ET)
+    down = {**fake_scan(30, 0), "requested_source": "webull", "source": "yfinance", "source_error": "NOT_SUBSCRIBED"}
+    up = {**fake_scan(30, 0), "requested_source": "webull", "source": "webull", "source_error": None}
+    first = scan.update_status(t, cfg, down)
+    assert len(first) == 1 and "Webull data unavailable" in first[0] and "yfinance" in first[0]
+    assert scan.update_status(t, cfg, down) == []                     # only once
+    back = scan.update_status(t, cfg, up)
+    assert len(back) == 1 and "Webull data is back" in back[0]
+    assert scan.update_status(t, cfg, up) == []

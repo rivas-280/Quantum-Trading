@@ -9,12 +9,13 @@
     1. Finds Python 3.11+ (offers to install it with winget if missing)
     2. Creates a private Python environment and installs the scanner's packages
     3. Saves your Slack webhook URL and posts a test message
-    4. Optionally stops this PC from sleeping while plugged in
-    5. Registers the scheduled task "ETF Signal Scanner", which starts the scanner
+    4. Saves your Webull OpenAPI App Key/Secret and connects to Webull (approve it in the Webull app)
+    5. Optionally stops this PC from sleeping while plugged in
+    6. Registers the scheduled task "ETF Signal Scanner", which starts the scanner
        at boot (whether or not you're logged in), restarts it if it crashes, and
        re-checks every 15 minutes that it's still running
-    6. Starts it now
-    7. Adds an "ETF Scanner" dashboard shortcut to the Desktop and Start menu
+    7. Starts it now
+    8. Adds an "ETF Scanner" dashboard shortcut to the Desktop and Start menu
 #>
 #Requires -RunAsAdministrator
 $ErrorActionPreference = "Stop"
@@ -30,10 +31,25 @@ $LogDir   = Join-Path $Skill "logs"
 $Log      = Join-Path $LogDir "scanner.log"
 $TaskName = "ETF Signal Scanner"
 
-function Step($n, $text) { Write-Host "`n[$n/7] $text" -ForegroundColor Cyan }
+function Step($n, $text) { Write-Host "`n[$n/8] $text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
 
 if (-not (Test-Path $Script)) { Fail "Can't find $Script. Run this from inside the Quantum-Trading folder." }
+
+# Clicking in a console window with QuickEdit on starts a text selection ("Select" in
+# the title), which freezes this script at its next output until Esc is pressed.
+# Turn QuickEdit off while installing. (Pasting still works with Ctrl+V.)
+try {
+    Add-Type -Namespace Install -Name Console -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int h);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
+'@
+    $hIn = [Install.Console]::GetStdHandle(-10); $mode = 0
+    if ([Install.Console]::GetConsoleMode($hIn, [ref]$mode)) {
+        [void][Install.Console]::SetConsoleMode($hIn, ($mode -band (-bnot 0x40)) -bor 0x80)
+    }
+} catch { }
 
 # ------------------------------------------------------------------ 1. Python
 Step 1 "Checking for Python 3.11 or newer"
@@ -87,15 +103,57 @@ if ($current) {
     if ($ans -eq "y") { $current = "" }
 }
 while (-not $current) {
-    $url = (Read-Host "Paste the Slack incoming-webhook URL for #etf-scanner (starts with https://hooks.slack.com/)").Trim()
+    $url = (Read-Host "Paste (Ctrl+V) the Slack incoming-webhook URL for #etf-scanner (starts with https://hooks.slack.com/)").Trim()
     if ($url -match '^https://hooks\.slack\.com/') { $current = $url } else { Write-Host "That doesn't look like a Slack webhook URL; try again." }
 }
 Set-Content -Path $Webhook -Value $current -NoNewline -Encoding ascii
 & $Py $Script --test-slack
 if ($LASTEXITCODE -ne 0) { Fail "Slack test post failed. Check the webhook URL and run the installer again." }
 
-# ------------------------------------------------------------------ 4. sleep
-Step 4 "Power settings"
+# ------------------------------------------------------------------ 4. Webull
+Step 4 "Webull market data"
+$WebullCreds = Join-Path $Skill "webull_credentials.yaml"
+function Test-WebullKeys {
+    if (-not (Test-Path $WebullCreds)) { return $false }
+    $t = Get-Content $WebullCreds -Raw
+    return ($t -match "(?m)^\s*app_key:\s*['""]?[^'""\s]+") -and ($t -match "(?m)^\s*app_secret:\s*['""]?[^'""\s]+")
+}
+$haveKeys = Test-WebullKeys
+if ($haveKeys) {
+    $ans = Read-Host "Webull App Key/Secret are already saved. Replace them? (y/N)"
+    if ($ans -eq "y") { $haveKeys = $false }
+}
+if (-not $haveKeys) {
+    Write-Host "Scans use Webull's own candles via the Webull OpenAPI (needs approved API access and an"
+    Write-Host "OpenAPI market-data subscription in your Webull account). Without it they use Yahoo Finance."
+    $key = (Read-Host "Webull OpenAPI App Key (press Enter to skip)").Trim()
+    if ($key) {
+        $sec = Read-Host "Webull OpenAPI App Secret (hidden)" -AsSecureString
+        $secret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)).Trim()
+        $q = { param($v) "'" + ($v -replace "'", "''") + "'" }
+        @(
+            "# Webull OpenAPI credentials for the ETF scanner. Private: git-ignored, never leaves this PC.",
+            "app_key: $(& $q $key)",
+            "app_secret: $(& $q $secret)",
+            "region: us"
+        ) | Set-Content -Path $WebullCreds -Encoding ascii
+        $secret = $null
+        $haveKeys = $true
+    }
+}
+if ($haveKeys) {
+    Write-Host "Connecting to Webull. If the Webull app shows an OpenAPI login request, approve it (waits up to 5 minutes)..."
+    & $Py $Script --webull-login
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ("Webull isn't ready yet (see above). Scans use Yahoo Finance until it is; once fixed, press " +
+                    "'Connect Webull' in the ETF Scanner dashboard.") -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "Skipped: scans use Yahoo Finance data. Re-run the installer to add Webull later."
+}
+
+# ------------------------------------------------------------------ 5. sleep
+Step 5 "Power settings"
 $ans = Read-Host "Stop this PC from sleeping or hibernating while plugged in, so scans don't pause? (Y/n)"
 if ($ans -ne "n") {
     powercfg /change standby-timeout-ac 0
@@ -105,8 +163,8 @@ if ($ans -ne "n") {
     Write-Host "Skipped. Scans pause whenever the PC sleeps."
 }
 
-# ------------------------------------------------------------------ 5. scheduled task
-Step 5 "Registering the scheduled task '$TaskName'"
+# ------------------------------------------------------------------ 6. scheduled task
+Step 6 "Registering the scheduled task '$TaskName'"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $cmdLine  = "`"$Py`" -u `"$Script`" --loop --post-slack >> `"$Log`" 2>&1"
 $action   = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$cmdLine`"" -WorkingDirectory $Repo
@@ -139,16 +197,16 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -S
     -Description "Scans leveraged-ETF underlyings every 15 min and posts signals to Slack #etf-scanner." | Out-Null
 Write-Host "Task registered."
 
-# ------------------------------------------------------------------ 6. start
-Step 6 "Starting the scanner"
+# ------------------------------------------------------------------ 7. start
+Step 7 "Starting the scanner"
 Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Seconds 20
 $state = (Get-ScheduledTask -TaskName $TaskName).State
 Write-Host "Task state: $state"
 if (Test-Path $Log) { Write-Host "`nLast log lines:"; Get-Content $Log -Tail 5 }
 
-# ------------------------------------------------------------------ 7. dashboard shortcut
-Step 7 "Adding the 'ETF Scanner' dashboard shortcut"
+# ------------------------------------------------------------------ 8. dashboard shortcut
+Step 8 "Adding the 'ETF Scanner' dashboard shortcut"
 $Pyw  = Join-Path $Venv "Scripts\pythonw.exe"
 $Dash = Join-Path $Skill "scripts\dashboard.py"
 $Icon = Join-Path $PSScriptRoot "etf-scanner.ico"

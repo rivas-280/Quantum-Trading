@@ -20,6 +20,27 @@ post into one channel.
 5. Copy the webhook URL (it starts with `https://hooks.slack.com/services/`).
    Treat it like a password: anyone with it can post to the channel.
 
+## 1b. Webull market data (optional, recommended)
+
+The scanner reads candles from Webull's OpenAPI, so its 1h / 2h / 4h / daily
+candles match the Webull app. Without it (or whenever Webull fails) it uses
+Yahoo Finance and says so in Slack and on the dashboard. You need, in your
+Webull account:
+
+1. **Approved OpenAPI access** and an **App Key + App Secret** (Webull's
+   developer portal: <https://developer.webull.com>, "Getting Started").
+2. An active **OpenAPI market-data subscription for US stock quotes**
+   (e.g. Nasdaq Basic, non-display). This is separate from any market-data
+   subscription in the Webull app or Webull Desktop; without it Webull answers
+   `MARKET_DATA_NOT_SUBSCRIBED`.
+
+The installer asks for the App Key and Secret (the secret is typed hidden) and
+saves them in `.claude\skills\etf-signal-scanner\webull_credentials.yaml`, which is
+git-ignored. Webull then asks you to **approve the login in the Webull app**;
+that approval lasts about two weeks. When it runs out, Slack gets a
+"Webull data unavailable" notice: open the dashboard, press **Connect Webull**,
+and approve the request in the Webull app.
+
 ## 2. Get the code onto the PC
 
 Either:
@@ -48,6 +69,8 @@ Keep the folder where it is afterwards: the scheduled task points at it.
    - If Python isn't installed it offers to install it; afterwards it asks you to
      open a new Administrator PowerShell and run the installer again.
    - Paste the webhook URL from step 1. A test message appears in `#etf-scanner`.
+   - Enter your Webull App Key and App Secret (or press Enter to skip), then approve
+     the login request in the Webull app.
    - Choose whether to stop the PC sleeping while plugged in (recommended: yes).
 
 When it finishes you'll see **ETF scanner started** in `#etf-scanner`, and an
@@ -73,6 +96,9 @@ Double-click **ETF Scanner** on the Desktop to open the dashboard:
   hovering shows the values under the cursor. The line under the price shows
   the scanner's verdict on the current candle (which of the 4 conditions are
   met). A chart opened from a signal starts on the timeframe that triggered it.
+- **Data**: where the last scan's candles came from (Webull or Yahoo Finance, and
+  why Webull wasn't used), and until when the Webull login is valid. **Connect
+  Webull** renews the login: approve the request that appears in the Webull app.
 - **Start scanner**: resumes a paused scanner, or starts the scheduled task if it
   isn't running. **Pause**: stops scanning and alerts until you press Start (it
   stays paused across reboots). **Scan now**: runs a full scan straight away, even
@@ -89,6 +115,7 @@ or resumed. Closing the dashboard doesn't stop the scanner.
 | See the status, last scan, start / pause | Double-click **ETF Scanner** on the Desktop |
 | Check it's running (text) | `powershell -ExecutionPolicy Bypass -File .\windows\status.ps1` |
 | Read the log | `Get-Content .claude\skills\etf-signal-scanner\logs\scanner.log -Tail 40` |
+| Renew the Webull login | Press **Connect Webull** in the dashboard, approve in the Webull app (or `.venv\Scripts\python.exe scripts\scan.py --webull-login` in the skill folder) |
 | Change settings | Edit `.claude\skills\etf-signal-scanner\config.yaml`, then restart: `Stop-ScheduledTask "ETF Signal Scanner"; Start-ScheduledTask "ETF Signal Scanner"` (as admin) |
 | Update the code | `git pull` (or download the ZIP again), run `install.ps1` again |
 | Remove it | `powershell -ExecutionPolicy Bypass -File .\windows\uninstall.ps1` (as admin) |
@@ -100,6 +127,8 @@ or resumed. Closing the dashboard doesn't stop the scanner.
 - **New SIGNAL** alerts, with the 1h / 2h / 4h / daily table.
 - **Stopped for the day**: after 20:00 ET, with the time scans resume.
 - **Isn't getting market data / data is back**: if half or more of the ETFs fail to download.
+- **Webull data unavailable / Webull data is back**: when the scanner has to fall
+  back to Yahoo Finance (with the reason and the fix), and when Webull works again.
 - **ETF scanner paused / resumed**: when you press Pause or Start in the dashboard.
 - **ETF scanner stopped**: when it's closed normally or uninstalled.
 

@@ -500,10 +500,25 @@ def configured_timeframes(data_cfg: dict) -> list[str]:
     return list(dict.fromkeys(tfs))
 
 
-def load_bars(ticker: str, timeframes: list[str], data_cfg: dict, session) -> dict[str, pd.DataFrame]:
-    """Download each needed interval once and build every timeframe from it."""
+def load_bars(ticker: str, timeframes: list[str], data_cfg: dict, session,
+              prefetched: dict | None = None) -> dict[str, pd.DataFrame]:
+    """Download each needed interval once and build every timeframe from it.
+    With source: webull every timeframe is Webull's own candle series
+    (`prefetched` = {timeframe: {TICKER: bars}} from one batched download)."""
     source = data_cfg.get("source", "yfinance")
     prepost = bool(data_cfg.get("include_prepost", False))
+    if source == "webull":
+        import webull_source as wb
+        out = {}
+        for tf in timeframes:
+            got = (prefetched or {}).get(tf)
+            if got is None:
+                got = wb.fetch_bars([ticker], tf, int(data_cfg.get("webull_bars", 600)), prepost)
+            bars = got.get(ticker.upper())
+            if bars is None or bars.empty:
+                raise RuntimeError(f"Webull returned no {tf} candles")
+            out[tf] = clean_bars(bars)
+        return out
     ranges = data_cfg.get("history_range", "auto")
     anchor = session_hours(data_cfg)[0]
     if source == "csv":
@@ -532,22 +547,52 @@ def load_bars(ticker: str, timeframes: list[str], data_cfg: dict, session) -> di
     return out
 
 
+def prefetch_webull(tickers: list[str], timeframes: list[str], data_cfg: dict) -> tuple[dict | None, str | None]:
+    """Download every ticker's candles from Webull in a few batched requests.
+    Returns ({timeframe: {TICKER: bars}}, None), or (None, why it failed)."""
+    try:
+        import webull_source as wb
+    except ImportError as exc:                    # SDK missing
+        return None, f"{type(exc).__name__}: {exc}"
+    try:
+        count = int(data_cfg.get("webull_bars", 600))
+        prepost = bool(data_cfg.get("include_prepost", False))
+        return {tf: wb.fetch_bars(tickers, tf, count, prepost) for tf in timeframes}, None
+    except wb.WebullError as exc:
+        return None, str(exc)
+    except Exception as exc:                      # unexpected response layout etc.
+        wb.reset_client()
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def run_scan(cfg: dict, only: set[str] | None, now: dt.datetime) -> dict:
     data_cfg = cfg["data"]
     timeframes = configured_timeframes(data_cfg)
     need = min_bars_needed(cfg["indicators"])
     closed_only = bool(data_cfg.get("closed_bars_only", False))
     session_close = session_hours(data_cfg)[1]
+    targets = build_targets(cfg, only)
+    requested = data_cfg.get("source", "yfinance")
+    prefetched, source_error = None, None
+    if requested == "webull":
+        prefetched, source_error = prefetch_webull([t["ticker"] for t in targets], timeframes, data_cfg)
+        if source_error:
+            fallback = data_cfg.get("fallback_source")
+            if not fallback:
+                raise RuntimeError(f"Webull data unavailable: {source_error}")
+            print(f"{now.astimezone(ET):%Y-%m-%d %H:%M} Webull data unavailable ({source_error}); "
+                  f"using {fallback} for this scan.", file=sys.stderr, flush=True)
+            data_cfg = {**data_cfg, "source": fallback}
     session = None
     if data_cfg.get("source", "yfinance") == "yahoo":
         import requests
         session = requests.Session()
 
     results, errors = [], []
-    for target in build_targets(cfg, only):
+    for target in targets:
         t = target["ticker"]
         try:
-            per_tf = load_bars(t, timeframes, data_cfg, session)
+            per_tf = load_bars(t, timeframes, data_cfg, session, prefetched)
         except SystemExit:
             raise
         except Exception as exc:
@@ -577,6 +622,8 @@ def run_scan(cfg: dict, only: set[str] | None, now: dt.datetime) -> dict:
         "timeframes": timeframes,
         "session": "extended (04:00-20:00 ET)" if data_cfg.get("include_prepost") else "regular (09:30-16:00 ET)",
         "source": data_cfg.get("source", "yfinance"),
+        "requested_source": requested,
+        "source_error": source_error,
         "tickers_scanned": len(results),
         "errors": errors,
         "results": results,
@@ -898,6 +945,17 @@ def update_status(now: dt.datetime, cfg: dict, scan: dict | None) -> list[str]:
             msgs.append(f":white_check_mark: **ETF scanner market data is back** · {now_et:%H:%M} ET, "
                         f"{scan['tickers_scanned']} of {total} ETFs scanned.")
             st["outage"] = False
+        if scan.get("requested_source") == "webull":
+            err = scan.get("source_error")
+            if err and not st.get("webull_down"):
+                msgs.append(
+                    f":warning: **Webull data unavailable** · {now_et:%H:%M} ET: {err[:300]}. "
+                    f"Scanning with {scan.get('source', 'the backup source')} data until it's fixed; "
+                    "this posts again when Webull data is back.")
+                st["webull_down"] = True
+            elif not err and st.get("webull_down"):
+                msgs.append(f":white_check_mark: **Webull data is back** · {now_et:%H:%M} ET; scanning with Webull again.")
+                st["webull_down"] = False
         st.update(running=True, last_scan=scan["scanned_at"])
     STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATUS_FILE.write_text(json.dumps(st, indent=2))
@@ -1092,6 +1150,8 @@ def scan_summary(scan: dict, forced: bool = False) -> dict:
                      "timeframes": tfs, "alerts": alerts.get(r["ticker"], [])})
     return {"scanned_at": scan["scanned_at"], "forced": forced, "timeframes": scan["timeframes"],
             "session": scan.get("session"), "tickers_scanned": scan["tickers_scanned"],
+            "source": scan.get("source"), "requested_source": scan.get("requested_source"),
+            "source_error": scan.get("source_error"),
             "alert_count": len(scan.get("alerts", [])),
             "signal_count": sum(1 for a in scan.get("alerts", []) if a["level"] == "SIGNAL"),
             "posted": scan.get("posted", 0),
@@ -1221,6 +1281,8 @@ def main(argv=None) -> int:
                    help="post alerts/status straight to a Slack incoming webhook "
                         "(SLACK_WEBHOOK_URL or slack_webhook_url.txt) instead of via Claude")
     p.add_argument("--test-slack", action="store_true", help="post one test message via the webhook and exit")
+    p.add_argument("--webull-login", action="store_true",
+                   help="log in to the Webull OpenAPI (approve the request in the Webull app), check data access, and exit")
     p.add_argument("--announce", choices=["start", "stop"],
                    help="post the started/stopped status message via the webhook and exit")
     args = p.parse_args(argv)
@@ -1245,6 +1307,19 @@ def main(argv=None) -> int:
                               f"{dt.datetime.now(tz=ET):%H:%M} ET. Slack posting works."], url)
         print("\n".join(errs) or "Test message posted.", file=sys.stderr if errs else sys.stdout)
         return 1 if errs else 0
+
+    if args.webull_login:
+        import webull_source as wb
+        print("Requesting a Webull OpenAPI login. If asked, approve it in the Webull app "
+              f"(waiting up to {wb.LOGIN_TOKEN_WAIT // 60} min)...", flush=True)
+        result = wb.login()
+        result["at"] = dt.datetime.now(tz=ET).isoformat(timespec="seconds")
+        exp = wb.token_expiry()
+        result["token_expires"] = exp.isoformat(timespec="seconds") if exp else None
+        write_json_atomic(SKILL_DIR / "state" / "webull_login.json", result)
+        print(("Webull: " if result["ok"] else "Webull problem: ") + result["message"]
+              + (f" (login valid until {exp:%a %b %d})" if result["ok"] and exp else ""), flush=True)
+        return 0 if result["ok"] else 1
 
     if args.announce:
         url, msg = webhook_url(), lifecycle_message(cfg, args.announce, int(cfg.get("interval_minutes", 15)))

@@ -6,3 +6,5 @@ __pycache__/
 .claude/skills/etf-signal-scanner/slack_webhook_url.txt
 .claude/skills/etf-signal-scanner/.venv/
 .claude/skills/etf-signal-scanner/logs/
+.claude/skills/etf-signal-scanner/webull_credentials.yaml
+webull_data_sdk.log*
