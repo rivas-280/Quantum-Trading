@@ -30,5 +30,9 @@ if ($stray.Count) {
     $stray | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Write-Host "Stopped $($stray.Count) scanner process(es)."
 }
+foreach ($dir in @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))) {
+    $lnk = Join-Path $dir "ETF Scanner.lnk"
+    if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host "Removed shortcut $lnk" }
+}
 # The scanner was killed rather than closed, so post its stop message for it.
 if (Test-Path $Py) { & $Py $Script --announce stop }

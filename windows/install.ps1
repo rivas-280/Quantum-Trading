@@ -14,6 +14,7 @@
        at boot (whether or not you're logged in), restarts it if it crashes, and
        re-checks every 15 minutes that it's still running
     6. Starts it now
+    7. Adds an "ETF Scanner" dashboard shortcut to the Desktop and Start menu
 #>
 #Requires -RunAsAdministrator
 $ErrorActionPreference = "Stop"
@@ -29,7 +30,7 @@ $LogDir   = Join-Path $Skill "logs"
 $Log      = Join-Path $LogDir "scanner.log"
 $TaskName = "ETF Signal Scanner"
 
-function Step($n, $text) { Write-Host "`n[$n/6] $text" -ForegroundColor Cyan }
+function Step($n, $text) { Write-Host "`n[$n/7] $text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
 
 if (-not (Test-Path $Script)) { Fail "Can't find $Script. Run this from inside the Quantum-Trading folder." }
@@ -145,9 +146,28 @@ Start-Sleep -Seconds 20
 $state = (Get-ScheduledTask -TaskName $TaskName).State
 Write-Host "Task state: $state"
 if (Test-Path $Log) { Write-Host "`nLast log lines:"; Get-Content $Log -Tail 5 }
+
+# ------------------------------------------------------------------ 7. dashboard shortcut
+Step 7 "Adding the 'ETF Scanner' dashboard shortcut"
+$Pyw  = Join-Path $Venv "Scripts\pythonw.exe"
+$Dash = Join-Path $Skill "scripts\dashboard.py"
+$Icon = Join-Path $PSScriptRoot "etf-scanner.ico"
+$shell = New-Object -ComObject WScript.Shell
+foreach ($dir in @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))) {
+    $lnk = $shell.CreateShortcut((Join-Path $dir "ETF Scanner.lnk"))
+    $lnk.TargetPath       = $Pyw
+    $lnk.Arguments        = "`"$Dash`""
+    $lnk.WorkingDirectory = $Repo
+    $lnk.IconLocation     = "$Icon,0"
+    $lnk.Description      = "ETF Signal Scanner dashboard: status, last scan, start / pause"
+    $lnk.Save()
+}
+Write-Host "Shortcut added to the Desktop and the Start menu."
 Write-Host @"
 
 Done. The scanner now runs on its own:
+  - Open the dashboard with the 'ETF Scanner' icon on the Desktop (or Start menu) to see
+    its status and the last scan, and to start, pause or scan now.
   - It posts 'ETF scanner started' to #etf-scanner each time it starts, alerts for new
     SIGNALs, a message when it stops for the day, and data-outage notices.
   - Log file:   $Log
